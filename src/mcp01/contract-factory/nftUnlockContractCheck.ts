@@ -1,27 +1,16 @@
-import * as BN from '../../bn.js'
 import * as mvc from '../../mvc'
 import { ContractAdapter } from '../../common/ContractAdapter'
 import {
-  dummyAddress,
   dummyCodehash,
-  dummyPadding,
-  dummyPayload,
-  dummyRabinPubKey,
-  dummyRabinPubKeyHashArray,
-  dummySigBE,
-  dummyTx,
 } from '../../common/dummy'
 import {
   buildContractClass,
   Bytes,
   FunctionCall,
-  getPreimage,
-  Int,
   SigHashPreimage,
   toHex,
 } from '../../scryptlib'
 import * as unlockProto from '../contract-proto/nftUnlockContractCheck.proto'
-import { NftFactory } from './nft'
 export class NftUnlockContractCheck extends ContractAdapter {
   constuctParams: { unlockType: NFT_UNLOCK_CONTRACT_TYPE }
   private _formatedDataPart: unlockProto.FormatedDataPart

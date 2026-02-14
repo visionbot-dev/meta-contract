@@ -17,18 +17,18 @@ contract NftSellForToken {
         SigHashPreimage txPreimage,
         bytes prevouts,
         // token
-        bytes tokenScript,
-        bytes tokenTxHeader,
-        bytes tokenTxHashProof,
-        bytes tokenTxSatoshiBytes,
+        bytes tokenScript, // only sell need
+        bytes tokenTxHeader,  // only sell need
+        bytes tokenTxHashProof,  // only sell need
+        bytes tokenTxSatoshiBytes,  // only sell need
         // nft
-        bytes nftScript,
+        bytes nftScript,  // only cancel need
         // sig
-        PubKey senderPubKey,
-        Sig senderSig,
+        PubKey senderPubKey,   // only cancel need
+        Sig senderSig,   // only cancel need
         // output
-        int tokenOutputSatoshis,
-        int nftOutputSatoshis,
+        int tokenOutputSatoshis,   // only sell need
+        int nftOutputSatoshis,    // only cancel need
         int op) {
 
         // check prevouts

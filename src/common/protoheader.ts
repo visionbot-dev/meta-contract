@@ -13,6 +13,7 @@ export enum PROTO_TYPE {
   UNIQUE = 2,
   NFT = 3,
   NFT_SELL = 0x00010001,
+  NFT_SELL_FOR_FT = 0x00010002,
 }
 
 export function getHeaderLen() {

@@ -1,25 +1,10 @@
-import * as BN from '../../bn.js'
 import * as mvc from '../../mvc'
 import { ContractAdapter } from '../../common/ContractAdapter'
-import {
-  dummyAddress,
-  dummyPadding,
-  dummyPayload,
-  dummyPk,
-  dummyRabinPubKey,
-  dummyRabinPubKeyHashArray,
-  dummySigBE,
-  dummyTx,
-  dummyTxId,
-} from '../../common/dummy'
 import { PROTO_TYPE } from '../../common/protoheader'
-import * as TokenUtil from '../../common/tokenUtil'
-import { PLACE_HOLDER_SIG } from '../../common/utils'
 import {
   buildContractClass,
   Bytes,
   FunctionCall,
-  getPreimage,
   Int,
   PubKey,
   Ripemd160,
@@ -30,8 +15,6 @@ import {
 import * as nftProto from '../contract-proto/nft.proto'
 import { NFT_OP_TYPE } from '../contract-proto/nft.proto'
 import { ContractUtil } from '../contractUtil'
-import { NftSellFactory } from './nftSell'
-import { NftUnlockContractCheckFactory, NFT_UNLOCK_CONTRACT_TYPE } from './nftUnlockContractCheck'
 
 export class Nft extends ContractAdapter {
   constuctParams: {

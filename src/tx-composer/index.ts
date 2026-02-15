@@ -190,6 +190,15 @@ export class TxComposer {
     return this.changeOutputIndex
   }
 
+  unlockP2PKHInputsBySig(sigHexList: string[]) {
+    sigHexList.forEach(sigHex => {
+      const sig = new mvc.Transaction.Signature(sigHex)
+      this.tx.inputs[sig.inputIndex].setScript(
+        mvc.Script.buildPublicKeyHashIn(sig.publicKey, sig.signature.toDER(), sig.sigtype)
+      )
+    })
+  }
+
   unlockP2PKHInput(privateKey: mvc.PrivateKey, inputIndex: number, sigtype = sighashType) {
     const tx = this.tx
     const sig = new mvc.Transaction.Signature({

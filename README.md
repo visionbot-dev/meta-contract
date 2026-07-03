@@ -7,7 +7,7 @@
 ## 安装
 
 ```bash
-npm install meta-contract --save
+npm install meta-contract-x --save
 ```
 
 ## FT（同质化代币）使用
@@ -15,7 +15,7 @@ npm install meta-contract --save
 ### 初始化
 
 ```js
-import { FtManager, API_TARGET } from 'meta-contract'
+import { FtManager, API_TARGET } from 'meta-contract-x'
 
 const ft = new FtManager({
   network: 'testnet',
@@ -101,7 +101,7 @@ let { balance, pendingBalance, utxoCount, decimal } = await ft.getBalanceDetail(
 ### 初始化
 
 ```ts
-import { API_NET, API_TARGET, mvc, NftManager } from 'meta-contract'
+import { API_NET, API_TARGET, mvc, NftManager } from 'meta-contract-x'
 
 // 生成新的种子，请保存助记词
 // let mnemonic = mvc.Mnemonic.fromString('cute siren parrot merit swamp plate federal buddy sing tourist family tragic')
@@ -163,7 +163,7 @@ console.log(result)
 出售 #1 NFT
 
 ```js
-let { sellTx, tx } = await nft.sell({
+let { sellTx, tx } = await nftManager.sell({
   genesis,
   codehash,
   tokenIndex: '1',
@@ -177,7 +177,7 @@ let { sellTx, tx } = await nft.sell({
 下架 #1 NFT
 
 ```js
-let { unlockCheckTx, tx } = await nft.cancelSell({
+let { unlockCheckTx, tx } = await nftManager.cancelSell({
   genesis,
   codehash,
   tokenIndex: '1',
@@ -191,7 +191,7 @@ let { unlockCheckTx, tx } = await nft.cancelSell({
 购买 #1 NFT
 
 ```js
-let { unlockCheckTx, tx } = await nft.buy({
+let { unlockCheckTx, tx } = await nftManager.buy({
   codehash,
   genesis,
   tokenIndex: '1',
@@ -221,7 +221,7 @@ interface ISigner {
 ### MetaletSigner
 
 ```ts
-import { NftManager, FtManager, MetaletSigner, API_NET, API_TARGET } from 'meta-contract'
+import { NftManager, FtManager, MetaletSigner, API_NET, API_TARGET } from 'meta-contract-x'
 
 const signer = new MetaletSigner(window.metaidwallet)
 ```

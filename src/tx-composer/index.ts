@@ -284,6 +284,15 @@ export class TxComposer {
     })
   }
 
+  /**
+   * 返回指定输入索引对应的 sighash 类型。
+   * 如果未注册，返回默认 sighashType。
+   */
+  getInputSigHashType(inputIndex: number): number {
+    const info = this.sigHashList.find((v) => v.inputIndex === inputIndex)
+    return info ? info.sighashType : sighashType
+  }
+
   getPrevoutsHash() {
     let prevouts = Buffer.alloc(0)
     this.tx.inputs.forEach((input) => {

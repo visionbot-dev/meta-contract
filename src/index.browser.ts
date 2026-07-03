@@ -27,3 +27,6 @@ import { FtManager } from './mcp02'
 const SensibleNFT = NftManager
 const SensibleFT = FtManager
 export { SensibleNFT, SensibleFT, NftManager, FtManager }
+
+export { ISigner, LocalSigner, MetaletSigner, signOneInput } from './signer'
+export { MetaletLike, MetaletSignTxParams, MetaletSignTxResult, SignOneResult } from './signer'

@@ -12,4 +12,4 @@ tests/acceptance/mcp02/cc.test.ts
 tests/acceptance/mcp02/convert.test.ts
 tests/acceptance/mcp02/mit.test.ts
 
-# renew
+# renewpackage-lock.json

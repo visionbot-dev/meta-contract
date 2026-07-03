@@ -1,16 +1,18 @@
 # Meta-Contract SDK
 
-This sdk helps you to interact with [MVC meta contracts][mvc]
+该 SDK 帮助您与 [MVC 元合约][mvc] 进行交互。
 
-Please read the [documentation](https://meta-contract-doc.vercel.app/) for more.
+更多文档请访问：<https://meta-contract-doc.vercel.app/>
 
-## How to install
+## 安装
 
+```bash
 npm install meta-contract --save
+```
 
-## How to use(FT)
+## FT（同质化代币）使用
 
-### Init
+### 初始化
 
 ```js
 import { FtManager, API_TARGET } from 'meta-contract'
@@ -18,16 +20,16 @@ import { FtManager, API_TARGET } from 'meta-contract'
 const ft = new FtManager({
   network: 'testnet',
   apiTarget: API_TARGET.MVC,
-  purse: '', //the wif of a mvc address to offer transaction fees
+  purse: '', // MVC 地址的 WIF 私钥，用于支付交易手续费
   feeb: 0.5,
   apiHost,
 })
 ```
 
-### Genesis
+### 创建代币（Genesis）
 
-Define a token with name,symbol,decimal number.
-You should save the returned values.(genesis、codehash、sensibleId)
+定义代币的名称、符号和小数位数。
+请保存返回的字段（genesis、codehash、sensibleId）。
 
 ```js
 let { txHex, txid, tx, genesis, codehash, sensibleId } = await ft.genesis({
@@ -39,9 +41,9 @@ let { txHex, txid, tx, genesis, codehash, sensibleId } = await ft.genesis({
 })
 ```
 
-### Mint
+### 增发（Mint）
 
-Mint 1000000000000 tokens
+增发 1000000000000 个代币
 
 ```js
 let { txid, txHex, tx } = await ft.mint({
@@ -50,13 +52,13 @@ let { txid, txHex, tx } = await ft.mint({
   genesisWif: CoffeeShop.wif,
   receiverAddress: CoffeeShop.address,
   tokenAmount: '1000000000000',
-  allowIncreaseMints: false, //if true then you can mint again
+  allowIncreaseMints: false, // 为 true 时可继续增发
 })
 ```
 
-### Transfer
+### 转账
 
-Transfer from CoffeShop to Alice and Bob
+从 CoffeeShop 转账给 Alice 和 Bob
 
 ```js
 let { txid } = await ft.transfer({
@@ -82,9 +84,9 @@ let { txid } = await ft.transfer({
 })
 ```
 
-### Query Balance
+### 查询余额
 
-Query token's balance
+查询代币余额
 
 ```js
 let { balance, pendingBalance, utxoCount, decimal } = await ft.getBalanceDetail({
@@ -94,44 +96,44 @@ let { balance, pendingBalance, utxoCount, decimal } = await ft.getBalanceDetail(
 })
 ```
 
-## How to use(NFT)
+## NFT（非同质化代币）使用
 
-### Init
+### 初始化
 
 ```ts
 import { API_NET, API_TARGET, mvc, NftManager } from 'meta-contract'
 
-// Generate new seed , need to memorize this mnemonic or use your own
-// let mnemonic = mvc.Mnemonic.fromString(cute siren parrot merit swamp plate federal buddy sing tourist family tragic)
+// 生成新的种子，请保存助记词
+// let mnemonic = mvc.Mnemonic.fromString('cute siren parrot merit swamp plate federal buddy sing tourist family tragic')
 let mnemonic = mvc.Mnemonic.fromRandom()
 console.log(mnemonic.toString())
 let hdPrivateKey = mnemonic.toHDPrivateKey('', 'testnet').deriveChild("m/44'/0'/0'")
 console.log(hdPrivateKey.publicKey.toAddress('testnet').toString())
 console.log(mnemonic.toHDPrivateKey('', 'testnet').deriveChild("m/44'/0'/0'").privateKey.toString())
-// use this private key to sign txs later
+// 使用此私钥签名交易
 const privKey = mnemonic.toHDPrivateKey('', 'testnet').deriveChild("m/44'/0'/0'").privateKey.toString()
 const nftManager = new NftManager({ apiTarget: API_TARGET.MVC, network: API_NET.TEST, purse: privKey })
-// todo remove authorize in the future
+// todo 后续将移除 authorize
 nftManager.api.authorize({ authorization: 'METASV_KEY' })
 ```
 
-### Genesis
+### 创建系列（Genesis）
 
-Define the NFT with totalSupply
-You should save the returned values.(genesis、codehash、sensibleId)
+定义 NFT 系列的总供应量
+请保存返回的字段（genesis、codehash、sensibleId）
 
 ```ts
 const result = await nftManager.genesis({ totalSupply: '10', version: 2 })
 console.log(result)
 ```
 
-### Mint
+### 铸造（Mint）
 
-Mint a NFT to CoffeeShop's address
-metaTxId is created by metaid which stands for NFT State
+铸造一个 NFT 到 CoffeeShop 地址
+metaTxId 由 metaid 创建，代表 NFT 状态
 
 ```js
-// todo generate metaId tx before mint
+// todo 在 mint 前生成 metaId 交易
 const mintResult = await nftManager.mint({
   version: 2,
   metaTxId: '0000000000000000000000000000000000000000000000000000000000000000',
@@ -141,9 +143,9 @@ const mintResult = await nftManager.mint({
 console.log(mintResult)
 ```
 
-### Transfer
+### 转账
 
-Transfer #1 NFT from CoffeShop to Alice
+将 #1 NFT 从 CoffeeShop 转给 Alice
 
 ```ts
 const result = await nftManager.transfer({
@@ -156,9 +158,9 @@ const result = await nftManager.transfer({
 console.log(result)
 ```
 
-### Sell
+### 上架销售
 
-Sell #1 NFT
+出售 #1 NFT
 
 ```js
 let { sellTx, tx } = await nft.sell({
@@ -170,9 +172,9 @@ let { sellTx, tx } = await nft.sell({
 })
 ```
 
-### Cancel Sell
+### 取消销售
 
-Cancel Sell #1 NFT
+下架 #1 NFT
 
 ```js
 let { unlockCheckTx, tx } = await nft.cancelSell({
@@ -184,9 +186,9 @@ let { unlockCheckTx, tx } = await nft.cancelSell({
 })
 ```
 
-### Buy
+### 购买
 
-Buy #1 NFT
+购买 #1 NFT
 
 ```js
 let { unlockCheckTx, tx } = await nft.buy({
@@ -198,9 +200,106 @@ let { unlockCheckTx, tx } = await nft.buy({
 })
 ```
 
-## Example
+## Metalet 钱包支持
 
-<a href="http://gitlab2.showpay.top/front-end/meta-contract/-/tree/master/examples">Go to examples</a>
+浏览器环境中可以使用 Metalet 插件钱包替代 WIF 私钥进行签名。
+
+### ISigner 接口
+
+```ts
+interface ISigner {
+  signInput(txComposer: TxComposer, inputIndex: number): Promise<{
+    pubKeyHex: string
+    sig: string
+    sigtype: number
+  }>
+  getAddress(network?: string): Promise<string>
+  getPublicKey(): Promise<string>
+}
+```
+
+### MetaletSigner
+
+```ts
+import { NftManager, FtManager, MetaletSigner, API_NET, API_TARGET } from 'meta-contract'
+
+const signer = new MetaletSigner(window.metaidwallet)
+```
+
+### NFT 转账（Metalet）
+
+```ts
+const nft = new NftManager({
+  network: API_NET.MAIN,
+  apiTarget: API_TARGET.APIMVC,
+  signer,                // ← 使用 MetaletSigner 替代 purse
+  feeb: 0.5,
+})
+
+// 需要先从 Metalet 获取 UTXO
+const utxos = (await window.metaidwallet.getUtxos()).map(u => ({
+  txId: u.txid,
+  outputIndex: u.outIndex ?? 0,
+  satoshis: Number(u.value ?? 0),
+  address: u.address,
+}))
+
+const result = await nft.transfer({
+  codehash: '...',
+  genesis: '...',
+  tokenIndex: '1',
+  receiverAddress: '...',
+  utxos,                 // ← 显式传入 SPACE UTXO
+})
+```
+
+### FT 转账（Metalet）
+
+```ts
+const ft = new FtManager({
+  network: API_NET.MAIN,
+  apiTarget: API_TARGET.APIMVC,
+  signer,                // ← 使用 MetaletSigner 替代 purse
+  feeb: 0.5,
+})
+
+// 从 Metalet 获取 SPACE UTXO
+const spaceUtxos = (await window.metaidwallet.getUtxos()).map(u => ({
+  txId: u.txid,
+  outputIndex: u.outIndex ?? 0,
+  satoshis: Number(u.value ?? 0),
+  address: u.address,
+}))
+
+// 也可以从 API 获取 FT UTXO
+const ftUtxos = [{
+  txId: '...',
+  outputIndex: 0,
+  tokenAddress: '...',
+  tokenAmount: '1000000000',
+}]
+
+const result = await ft.transfer({
+  codehash: '...',
+  genesis: '...',
+  receivers: [{ address: '...', amount: '10000000' }],
+  utxos: spaceUtxos,
+  ftUtxos,
+  ftChangeAddress: senderAddress,
+  changeAddress: senderAddress,
+})
+```
+
+### 说明
+
+- 使用 `signer` 时无需提供 `purse`、`senderWif` 等私钥参数
+- 需要**显式传入** `utxos`（SPACE UTXO 用于支付矿工费）和 `ftUtxos`（FT UTXO）
+- Metalet 每次签名会弹出钱包窗口让用户确认
+- 合约输入采用三轮签名策略：前两轮用占位符估算交易大小，最终轮由 Metalet 签名
+
+## 示例
+
+<a href="http://gitlab2.showpay.top/front-end/meta-contract/-/tree/master/examples">查看示例</a>
 
 [docs]: ''
 [mvc]: ''

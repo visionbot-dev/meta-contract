@@ -2,6 +2,7 @@ import { DustCalculator } from '../common/DustCalculator'
 import { sighashType, TxComposer } from '../tx-composer'
 import * as mvc from '../mvc'
 import { BN, API_NET, Api, API_TARGET } from '..'
+import { ISigner, LocalSigner } from '../signer'
 
 import { NftGenesis, NftGenesisFactory } from './contract-factory/nftGenesis'
 import { NFT_SELL_OP, NftSellFactory, NftSell } from './contract-factory/nftSell'
@@ -132,6 +133,7 @@ export class NftManager {
   private _api: Api
   private debug: boolean
   private unlockContractCodeHashArray: Bytes[]
+  private signer?: ISigner
 
   get api() {
     return this._api
@@ -143,15 +145,17 @@ export class NftManager {
 
   constructor({
     purse,
+    signer,
     network = API_NET.MAIN,
     apiTarget = API_TARGET.MVC,
     apiHost,
     feeb = FEEB,
     debug = false,
   }: {
-    purse: string
-    network: API_NET
-    apiTarget: API_TARGET
+    purse?: string
+    signer?: ISigner
+    network?: API_NET
+    apiTarget?: API_TARGET
     apiHost?: string
     feeb?: number
     debug?: boolean
@@ -165,13 +169,16 @@ export class NftManager {
 
     this.debug = debug
 
-    if (purse) {
+    if (signer) {
+      this.signer = signer
+    } else if (purse) {
       const privateKey = mvc.PrivateKey.fromWIF(purse)
       const address = privateKey.toAddress(this.network)
       this.purse = {
         privateKey,
         address,
       }
+      this.signer = new LocalSigner(privateKey)
     }
   }
 
@@ -379,7 +386,18 @@ export class NftManager {
     }
 
     addChangeOutput(txComposer, changeAddress, this.feeb)
-    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, utxoPrivateKeys)
+    // 解锁付钱输入（通过 signer）
+    for (const idx of p2pkhInputIndexes) {
+      const sr = await this.signer!.signInput(txComposer, idx)
+      const derHex = sr.sig.slice(0, -2)
+      txComposer.getInput(idx).setScript(
+        mvc.Script.buildPublicKeyHashIn(
+          new mvc.PublicKey(sr.pubKeyHex),
+          Buffer.from(derHex, 'hex'),
+          sighashType,
+        ),
+      )
+    }
 
     // 检查最终费率
     checkFeeRate(txComposer, this.feeb)
@@ -1965,7 +1983,7 @@ export class NftManager {
       opreturnScriptHex = txComposer.getOutput(opreturnOutputIndex).script.toHex()
     }
     // 第六步：解锁nft合约，并找零
-    this.unlockNftAndChange({
+    await this.unlockNftAndChange({
       txComposer,
       nftUtxo,
       nftInputIndex,
@@ -1978,8 +1996,18 @@ export class NftManager {
       opreturnScriptHex,
     })
 
-    // 第七步：解锁付钱输入
-    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, utxoPrivateKeys)
+    // 第七步：解锁付钱输入（通过 signer）
+    for (const idx of p2pkhInputIndexes) {
+      const sr = await this.signer!.signInput(txComposer, idx)
+      const derHex = sr.sig.slice(0, -2)
+      txComposer.getInput(idx).setScript(
+        mvc.Script.buildPublicKeyHashIn(
+          new mvc.PublicKey(sr.pubKeyHex),
+          Buffer.from(derHex, 'hex'),
+          sighashType,
+        ),
+      )
+    }
 
     // 第八步：检查最终费率
     checkFeeRate(txComposer, this.feeb)
@@ -2111,7 +2139,7 @@ export class NftManager {
     }
 
     // 第六步：添加找零输出，解锁创世合约输入
-    this.unlockGenesisAndChange(
+    await this.unlockGenesisAndChange(
       txComposer,
       genesisUtxo,
       genesisContract,
@@ -2122,8 +2150,18 @@ export class NftManager {
       opreturnScriptHex
     )
 
-    // 第七步：解锁付钱输入
-    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, utxoPrivateKeys)
+    // 第七步：解锁付钱输入（通过 signer）
+    for (const idx of p2pkhInputIndexes) {
+      const sr = await this.signer!.signInput(txComposer, idx)
+      const derHex = sr.sig.slice(0, -2)
+      txComposer.getInput(idx).setScript(
+        mvc.Script.buildPublicKeyHashIn(
+          new mvc.PublicKey(sr.pubKeyHex),
+          Buffer.from(derHex, 'hex'),
+          sighashType,
+        ),
+      )
+    }
 
     // 第八步：检查最终费率
     checkFeeRate(txComposer, this.feeb)
@@ -2169,7 +2207,7 @@ export class NftManager {
   }
 
   // 解锁创世合约并找零
-  private unlockGenesisAndChange(
+  private async unlockGenesisAndChange(
     txComposer: TxComposer,
     genesisUtxo: any,
     genesisContract: NftGenesis,
@@ -2179,9 +2217,8 @@ export class NftManager {
     changeAddress: Address,
     opreturnScriptHex: string
   ) {
-    const genesisPrivateKey = mvc.PrivateKey.fromWIF(this.purse.privateKey.toWIF())
-    const genesisPublicKey = genesisPrivateKey.toPublicKey()
-    const pubKey = new PubKey(toHex(genesisPublicKey))
+    const senderPublicKeyHex = await this.signer!.getPublicKey()
+    const pubKey = new PubKey(senderPublicKeyHex)
 
     const { genesisTxHeader, prevInputIndex, genesisTxInputProof } =
       createGenesisTxInputProof(genesisUtxo)
@@ -2196,11 +2233,16 @@ export class NftManager {
       txComposer.clearChangeOutput()
       const changeOutputIndex = txComposer.appendChangeOutput(changeAddress, this.feeb)
       const txPreimage = txComposer.getInputPreimage(genesisInputIndex)
-      const sig = new Sig(
-        genesisPrivateKey
-          ? toHex(txComposer.getTxFormatSig(genesisPrivateKey, genesisInputIndex))
-          : PLACE_HOLDER_SIG
-      )
+
+      // 三轮签名策略：第 0 轮用占位符估算大小，第 1 轮用真实签名
+      let sigHex: string
+      if (c === 0) {
+        sigHex = PLACE_HOLDER_SIG
+      } else {
+        const sr = await this.signer!.signInput(txComposer, genesisInputIndex)
+        sigHex = sr.sig
+      }
+      const sig = new Sig(sigHex)
 
       let unlockResult = genesisContract.unlock({
         txPreimage,
@@ -2225,7 +2267,7 @@ export class NftManager {
         opReturnScript: new Bytes(opreturnScriptHex),
       })
 
-      if (this.debug && genesisPrivateKey && c == 1) {
+      if (this.debug && c == 1) {
         let ret = unlockResult.verify({
           tx: txComposer.getTx(),
           inputIndex: 0,
@@ -2239,7 +2281,7 @@ export class NftManager {
   }
 
   // 解锁NFT合约并找零
-  private unlockNftAndChange({
+  private async unlockNftAndChange({
     txComposer,
     nftUtxo,
     nftInputIndex,
@@ -2263,9 +2305,8 @@ export class NftManager {
     opreturnScriptHex: string
   }) {
     const version = determineCodehashVersion(codehash)
-    
-    const nftPrivateKey = this.purse.privateKey
-    const senderPubkey = nftPrivateKey.toPublicKey()
+
+    const senderPublicKeyHex = await this.signer!.getPublicKey()
 
     for (let c = 0; c < 2; c++) {
       txComposer.clearChangeOutput()
@@ -2290,15 +2331,23 @@ export class NftManager {
       const contractTxProof = new TxOutputProof(TokenUtil.getEmptyTxOutputProof())
 
       const amountCheckOutputIndex = 0
-      // const amountCheckScriptBuf = amountCheckTx.outputs[amountCheckOutputIndex].script.toBuffer()
       const amountCheckScriptBuf = Buffer.alloc(0)
       const amountCheckHashIndex = 0
       const amountCheckInputIndex = txComposer.getTx().inputs.length - 1
-      // const amountCheckTxProof = new TxOutputProof(
-      //   TokenUtil.getTxOutputProof(amountCheckTx, amountCheckOutputIndex)
-      // )
       const amountCheckTxProof = new TxOutputProof(TokenUtil.getEmptyTxOutputProof())
       const amountCheckScrypt = new Bytes(amountCheckScriptBuf.toString('hex'))
+
+      // 三轮签名策略：
+      //   第 0 轮：PLACEHOLDER_SIG 用于估算交易大小
+      //   第 1 轮：通过 signer 获取真实签名，交易状态收敛
+      //   循环结束后：P2PKH 输入单独签名
+      let sigHex: string
+      if (c === 0) {
+        sigHex = PLACE_HOLDER_SIG
+      } else {
+        const sr = await this.signer!.signInput(txComposer, nftInputIndex)
+        sigHex = sr.sig
+      }
 
       const unlockingContract = nftContract.unlock({
         txPreimage: txComposer.getInputPreimage(nftInputIndex),
@@ -2319,8 +2368,8 @@ export class NftManager {
         amountCheckTxProof,
         amountCheckScrypt,
 
-        senderPubKey: new PubKey(toHex(senderPubkey)),
-        senderSig: new Sig(toHex(txComposer.getTxFormatSig(nftPrivateKey, nftInputIndex))),
+        senderPubKey: new PubKey(senderPublicKeyHex),
+        senderSig: new Sig(sigHex),
 
         receiverAddress: new Bytes(toHex(receiverAddress.hashBuffer)),
         nftOutputSatoshis: new Int(txComposer.getOutput(nftOutputIndex).satoshis),
@@ -2333,7 +2382,7 @@ export class NftManager {
         operation: nftProto.NFT_OP_TYPE.TRANSFER,
       })
 
-      if (this.debug && nftPrivateKey) {
+      if (this.debug && c === 1) {
         let txContext = {
           tx: txComposer.tx,
           inputIndex: nftInputIndex,
@@ -2348,7 +2397,7 @@ export class NftManager {
   }
 
   // 解锁NFT合约并找零(合约)
-  private unlockNftAndChangeFromContract({
+  private async unlockNftAndChangeFromContract({
     txComposer,
     nftUtxo,
     nftInputIndex,
@@ -2374,9 +2423,8 @@ export class NftManager {
     opreturnScriptHex: string
   }) {
     const version = determineCodehashVersion(codehash)
-    
-    const nftPrivateKey = this.purse.privateKey
-    const senderPubkey = nftPrivateKey.toPublicKey()
+
+    const senderPublicKeyHex = await this.signer!.getPublicKey()
 
     for (let c = 0; c < 2; c++) {
       txComposer.clearChangeOutput()
@@ -2401,15 +2449,20 @@ export class NftManager {
       const contractInputIndex = sellInputIndex
       const contractTxProof = new TxOutputProof(TokenUtil.getEmptyTxOutputProof())
       const amountCheckOutputIndex = 0
-      // const amountCheckScriptBuf = amountCheckTx.outputs[amountCheckOutputIndex].script.toBuffer()
       const amountCheckScriptBuf = Buffer.alloc(0)
       const amountCheckHashIndex = 0
       const amountCheckInputIndex = txComposer.getTx().inputs.length - 1
-      // const amountCheckTxProof = new TxOutputProof(
-      //   TokenUtil.getTxOutputProof(amountCheckTx, amountCheckOutputIndex)
-      // )
       const amountCheckTxProof = new TxOutputProof(TokenUtil.getEmptyTxOutputProof())
       const amountCheckScrypt = new Bytes(amountCheckScriptBuf.toString('hex'))
+
+      // 三轮签名策略
+      let sigHex: string
+      if (c === 0) {
+        sigHex = PLACE_HOLDER_SIG
+      } else {
+        const sr = await this.signer!.signInput(txComposer, nftInputIndex)
+        sigHex = sr.sig
+      }
 
       const unlockingContract = nftContract.unlock({
         txPreimage: txComposer.getInputPreimage(nftInputIndex),
@@ -2430,8 +2483,8 @@ export class NftManager {
         amountCheckTxProof,
         amountCheckScrypt,
 
-        senderPubKey: new PubKey(toHex(senderPubkey)),
-        senderSig: new Sig(toHex(txComposer.getTxFormatSig(nftPrivateKey, nftInputIndex))),
+        senderPubKey: new PubKey(senderPublicKeyHex),
+        senderSig: new Sig(sigHex),
 
         receiverAddress: new Bytes(toHex(receiverAddress.hashBuffer)),
         nftOutputSatoshis: new Int(txComposer.getOutput(nftOutputIndex).satoshis),
@@ -2444,7 +2497,7 @@ export class NftManager {
         operation: nftProto.NFT_OP_TYPE.TRANSFER,
       })
 
-      if (this.debug && nftPrivateKey) {
+      if (this.debug && c === 1) {
         let txContext = {
           tx: txComposer.tx,
           inputIndex: nftInputIndex,

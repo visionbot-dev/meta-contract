@@ -12,6 +12,7 @@ import {
 import { CodeError, ErrCode } from '../common/error'
 import * as mvc from '../mvc'
 import { Api, API_NET, API_TARGET } from '..'
+import { ISigner, LocalSigner } from '../signer'
 
 import { BURN_ADDRESS, FEEB } from './constants'
 import * as BN from '../bn.js'
@@ -160,6 +161,7 @@ type Mcp02Options = {
   apiTarget?: API_TARGET
   apiHost?: string
   purse?: string
+  signer?: ISigner
   feeb?: number
   dustLimitFactor?: number
   dustAmount?: number
@@ -222,6 +224,7 @@ export class FtManager {
   transferCheckCodeHashArray: Bytes[]
   unlockContractCodeHashArray: Bytes[]
   private debug: boolean
+  private signer?: ISigner
 
   get api() {
     return this._api
@@ -235,6 +238,7 @@ export class FtManager {
     network = API_NET.MAIN,
     apiTarget = API_TARGET.CYBER3,
     purse,
+    signer,
     feeb = FEEB,
     apiHost,
     dustLimitFactor = 300,
@@ -243,16 +247,18 @@ export class FtManager {
   }: Mcp02Options) {
     // 初始化API
     this.network = network
-    this._api = new Api(network, apiTarget,apiHost)
+    this._api = new Api(network, apiTarget, apiHost)
 
-    // 初始化钱包
-    if (purse) {
+    if (signer) {
+      this.signer = signer
+    } else if (purse) {
       const privateKey = mvc.PrivateKey.fromWIF(purse)
       const address = privateKey.toAddress(network)
       this.purse = {
         privateKey,
         address,
       }
+      this.signer = new LocalSigner(privateKey)
     }
 
     // 初始化零地址
@@ -1019,6 +1025,9 @@ export class FtManager {
     let senderPublicKey: mvc.PublicKey
     if (senderWif) {
       senderPrivateKey = new mvc.PrivateKey(senderWif)
+      senderPublicKey = senderPrivateKey.toPublicKey()
+    } else if (this.signer) {
+      // Metalet mode: public key obtained from signer
     }
 
     let utxoInfo = await this._pretreatUtxos(utxos)
@@ -1628,6 +1637,18 @@ export class FtManager {
         let privateKey = utxoPrivateKeys.splice(0, 1)[0]
         transferCheckTxComposer.unlockP2PKHInput(privateKey, inputIndex)
       })
+    } else if (this.signer) {
+      for (const inputIndex of transferCheck_p2pkhInputIndexs) {
+        const sr = await this.signer.signInput(transferCheckTxComposer, inputIndex)
+        const derHex = sr.sig.slice(0, -2)
+        transferCheckTxComposer.getInput(inputIndex).setScript(
+          mvc.Script.buildPublicKeyHashIn(
+            new mvc.PublicKey(sr.pubKeyHex),
+            Buffer.from(derHex, 'hex'),
+            sighashType,
+          ),
+        )
+      }
     } else {
       //To supplement the size calculation when unsigned
       transferCheck_p2pkhInputIndexs.forEach((v) => {
@@ -1760,9 +1781,10 @@ export class FtManager {
       let tokenSatoshiBytesArray = Buffer.alloc(0)
 
       // process each ft utxo input, unlock the token utxo
-      ftUtxoInputIndexs.forEach((inputIndex, idx) => {
-        let ftUtxo = ftUtxos[idx]
-        let senderPrivateKey = ftPrivateKeys[idx]
+      for (let idx = 0; idx < ftUtxoInputIndexs.length; idx++) {
+        const inputIndex = ftUtxoInputIndexs[idx]
+        const ftUtxo = ftUtxos[idx]
+        const senderPrivateKey = ftPrivateKeys[idx]
 
         let dataPartObj = ftProto.parseDataPart(ftUtxo.lockingScript.toBuffer())
         const dataPart = ftProto.newDataPart(dataPartObj)
@@ -1815,6 +1837,23 @@ export class FtManager {
 
         tokenContract.setDataPart(toHex(dataPart))
 
+        // 三轮签名策略：
+        //   第 0 轮：占位符签名用于估算交易大小
+        //   第 1 轮：从 signer（或本地私钥）获取真实签名
+        let ftSigHex: string
+        let ftPubKeyHex: string
+        if (senderPrivateKey) {
+          ftPubKeyHex = toHex(senderPrivateKey.toPublicKey().toBuffer())
+          ftSigHex = toHex(txComposer.getTxFormatSig(senderPrivateKey, inputIndex))
+        } else if (c === 1 && this.signer) {
+          const sr = await this.signer.signInput(txComposer, inputIndex)
+          ftSigHex = sr.sig
+          ftPubKeyHex = sr.pubKeyHex
+        } else {
+          ftPubKeyHex = ftUtxo.publicKey ? ftUtxo.publicKey.toHex() : PLACE_HOLDER_PUBKEY
+          ftSigHex = PLACE_HOLDER_SIG
+        }
+
         // unlock the token utxo
         const unlockingContract = tokenContract.unlock({
           txPreimage: txComposer.getInputPreimage(inputIndex),
@@ -1833,12 +1872,8 @@ export class FtManager {
           tokenTxInputProof,
           prevTokenTxOutputProof,
 
-          senderPubKey: new PubKey(ftUtxo.publicKey ? ftUtxo.publicKey.toHex() : PLACE_HOLDER_PUBKEY),
-          senderSig: new Sig(
-            senderPrivateKey
-              ? toHex(txComposer.getTxFormatSig(senderPrivateKey, inputIndex))
-              : PLACE_HOLDER_SIG
-          ),
+          senderPubKey: new PubKey(ftPubKeyHex),
+          senderSig: new Sig(ftSigHex),
 
           // contractInputIndex: transferCheckInputIndex,
           // contractTxOutputProof,
@@ -1863,7 +1898,7 @@ export class FtManager {
         }
 
         txComposer.getInput(inputIndex).setScript(unlockingContract.toScript() as mvc.Script)
-      })
+      }
 
       const tokenOutputSatoshis = txComposer.getOutput(0).satoshis
 
@@ -1923,6 +1958,18 @@ export class FtManager {
         let privateKey = utxoPrivateKeys.splice(0, 1)[0]
         txComposer.unlockP2PKHInput(privateKey, inputIndex)
       })
+    } else if (this.signer) {
+      for (const inputIndex of p2pkhInputIndexs) {
+        const sr = await this.signer.signInput(txComposer, inputIndex)
+        const derHex = sr.sig.slice(0, -2)
+        txComposer.getInput(inputIndex).setScript(
+          mvc.Script.buildPublicKeyHashIn(
+            new mvc.PublicKey(sr.pubKeyHex),
+            Buffer.from(derHex, 'hex'),
+            sighashType,
+          ),
+        )
+      }
     }
     checkFeeRate(txComposer, this.feeb)
 

@@ -11,6 +11,9 @@ export { OutputType, TxDecoder } from './tx-decoder'
 export { TxComposer } from './tx-composer'
 export { Wallet } from './wallet'
 
+export { ISigner, LocalSigner, MetaletSigner, signOneInput } from './signer'
+export { MetaletLike, MetaletSignTxParams, MetaletSignTxResult, SignOneResult } from './signer'
+
 // 兼容
 const SensibleNFT = NftManager
 const SensibleFT = FtManager

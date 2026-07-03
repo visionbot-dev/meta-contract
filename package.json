@@ -1,5 +1,5 @@
 {
-  "name": "meta-contract",
+  "name": "meta-contract-x",
   "version": "0.5.0",
   "description": "Meta Contract SDK",
   "main": "dist/index.js",

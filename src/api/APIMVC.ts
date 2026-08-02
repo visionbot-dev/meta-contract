@@ -327,16 +327,31 @@ export class APIMVC implements ApiBase {
     }))
 
     // ⚠️ mvcapi 对刚 transfer 的 NFT 索引异常：同 tokenIndex 可能返回多个 utxo（旧已花费 + 新持有）。
-    //    解析各候选 tx 输入，剔除已被消费的旧 utxo（否则 transfer 消费旧 utxo → Missing inputs）
-    const raws = await Promise.all(ret.map((u) => this.getRawTxData(u.txId).catch(() => null)))
-    const consumed = new Set<string>()
-    for (const raw of raws) {
-      if (!raw) continue
-      const tx = new mvc.Transaction(raw)
-      for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+    //    只有 tokenIndex 相同的候选才可能被互相消费，按 tokenIndex 分组交叉验证，剔除已被消费的旧 utxo
+    //    （否则 transfer 消费旧 utxo → Missing inputs）
+    const groups = new Map<string, NonFungibleTokenUnspent[]>()
+    for (const u of ret) {
+      const list = groups.get(u.tokenIndex)
+      if (list) list.push(u)
+      else groups.set(u.tokenIndex, [u])
     }
-    const kept = ret.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
-    if (kept.length) ret = kept
+    const kept: NonFungibleTokenUnspent[] = []
+    for (const group of groups.values()) {
+      if (group.length <= 1) {
+        kept.push(...group)
+        continue
+      }
+      const raws = await Promise.all(group.map((u) => this.getRawTxData(u.txId).catch(() => null)))
+      const consumed = new Set<string>()
+      for (const raw of raws) {
+        if (!raw) continue
+        const tx = new mvc.Transaction(raw)
+        for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+      }
+      const groupKept = group.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
+      kept.push(...(groupKept.length ? groupKept : group))
+    }
+    ret = kept
 
     return ret
   }

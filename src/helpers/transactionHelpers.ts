@@ -1,6 +1,6 @@
 import { Address, PrivateKey, Script, Transaction } from '../mvc'
 import { CodeError, ErrCode } from '../common/error'
-import { Api, API_NET, TxComposer } from '..'
+import { Api, API_NET, BN, TxComposer } from '..'
 import { CONTRACT_TYPE, sighashType } from '../common/utils'
 import { ContractAdapter } from '../common/ContractAdapter'
 import { DustCalculator } from '../common/DustCalculator'
@@ -262,10 +262,10 @@ async function getLatestGenesisUtxo(
   //    因此即使找到 genesis utxo 也要查询 issue utxo；issue 存在时以 issue 为准（链上最新）
   let issueUtxos = await queryUtxos(issueGenesis)
 
-  // ⚠️ issue utxo 存在多个时剔除已被消费的旧 utxo
-  //    （创世链每次 mint 消费旧创世产出新创世，理论同一时刻只有一个未花费）
+  // ⚠️ issue utxo 存在多个时保留 tokenIndex 最大的（创世链每次 mint 消费旧创世产出新创世，
+  //    tokenIndex 单调递增，最大者即链的最新端点；其余为索引延迟残留的已消费旧 utxo）
   if (issueUtxos.length > 1) {
-    issueUtxos = await filterSpentUtxos(api, issueUtxos)
+    issueUtxos = [issueUtxos.reduce((a, b) => (new BN(b.tokenIndex).gt(new BN(a.tokenIndex)) ? b : a))]
   }
   if (issueUtxos.length > 0) {
     unspent = issueUtxos[0]
@@ -277,20 +277,6 @@ async function getLatestGenesisUtxo(
       outputIndex: unspent.outputIndex,
     }
   }
-}
-
-// ⚠️ mvcapi 索引延迟可能返回已被消费的 utxo：解析各候选 tx 输入，剔除被消费的 outpoint。
-//    全部被消费时保守保留原列表（避免误删导致返回空）
-async function filterSpentUtxos(api: Api, utxos: any[]): Promise<any[]> {
-  const raws = await Promise.all(utxos.map((u) => api.getRawTxData(u.txId).catch(() => null)))
-  const consumed = new Set<string>()
-  for (const raw of raws) {
-    if (!raw) continue
-    const tx = new Transaction(raw)
-    for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
-  }
-  const kept = utxos.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
-  return kept.length ? kept : utxos
 }
 
 export function parseSensibleId(sensibleId: string) {

@@ -2006,17 +2006,23 @@ export class NftManager {
       opreturnScriptHex,
     })
 
-    // 第七步：解锁付钱输入（通过 signer）
-    for (const idx of p2pkhInputIndexes) {
-      const sr = await this.signer!.signInput(txComposer, idx)
-      const derHex = sr.sig.slice(0, -2)
-      txComposer.getInput(idx).setScript(
-        mvc.Script.buildPublicKeyHashIn(
-          new mvc.PublicKey(sr.pubKeyHex),
-          Buffer.from(derHex, 'hex'),
-          sighashType,
-        ),
-      )
+    // 第七步：解锁付钱输入
+    // ⚠️ 优先用 utxoPrivateKeys（utxos 传入的 wif 各自签名——存档链 SPACE 锁托管由托管私钥签名，
+    //    genesis 解锁用 purse/genesisWif 与 SPACE 签名者可不同）；无显式 utxo wif 时退回 signer（purse）
+    if (utxoPrivateKeys && utxoPrivateKeys.length) {
+      unlockP2PKHInputs(txComposer, p2pkhInputIndexes, utxoPrivateKeys.slice())
+    } else {
+      for (const idx of p2pkhInputIndexes) {
+        const sr = await this.signer!.signInput(txComposer, idx)
+        const derHex = sr.sig.slice(0, -2)
+        txComposer.getInput(idx).setScript(
+          mvc.Script.buildPublicKeyHashIn(
+            new mvc.PublicKey(sr.pubKeyHex),
+            Buffer.from(derHex, 'hex'),
+            sighashType,
+          ),
+        )
+      }
     }
 
     // 第八步：检查最终费率
@@ -2160,17 +2166,23 @@ export class NftManager {
       opreturnScriptHex
     )
 
-    // 第七步：解锁付钱输入（通过 signer）
-    for (const idx of p2pkhInputIndexes) {
-      const sr = await this.signer!.signInput(txComposer, idx)
-      const derHex = sr.sig.slice(0, -2)
-      txComposer.getInput(idx).setScript(
-        mvc.Script.buildPublicKeyHashIn(
-          new mvc.PublicKey(sr.pubKeyHex),
-          Buffer.from(derHex, 'hex'),
-          sighashType,
-        ),
-      )
+    // 第七步：解锁付钱输入
+    // ⚠️ 优先用 utxoPrivateKeys（utxos 传入的 wif 各自签名——存档链 SPACE 锁托管由托管私钥签名，
+    //    genesis 解锁用 purse/genesisWif 与 SPACE 签名者可不同）；无显式 utxo wif 时退回 signer（purse）
+    if (utxoPrivateKeys && utxoPrivateKeys.length) {
+      unlockP2PKHInputs(txComposer, p2pkhInputIndexes, utxoPrivateKeys.slice())
+    } else {
+      for (const idx of p2pkhInputIndexes) {
+        const sr = await this.signer!.signInput(txComposer, idx)
+        const derHex = sr.sig.slice(0, -2)
+        txComposer.getInput(idx).setScript(
+          mvc.Script.buildPublicKeyHashIn(
+            new mvc.PublicKey(sr.pubKeyHex),
+            Buffer.from(derHex, 'hex'),
+            sighashType,
+          ),
+        )
+      }
     }
 
     // 第八步：检查最终费率

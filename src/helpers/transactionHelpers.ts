@@ -234,7 +234,6 @@ async function getLatestGenesisUtxo(
   type: string
 ): Promise<any> {
   // 使用创世txid从接口获取该创世tx内容
-  let unspent: any
   let latestGenesisTxHex = await api.getRawTxData(genesisTxId)
   let latestGenesisTx = new Transaction(latestGenesisTxHex)
 
@@ -242,38 +241,34 @@ async function getLatestGenesisUtxo(
   let scriptBuffer = latestGenesisTx.outputs[genesisOutputIndex].script.toBuffer()
   let originGenesis = proto.getQueryGenesis(scriptBuffer)
 
-  // 找回utxo
-  let genesisUtxos
-  if (type === 'nft') {
-    genesisUtxos = await api.getNonFungibleTokenUnspents(
-      codehash,
-      originGenesis,
-      address.toString()
-    )
-  } else {
-    genesisUtxos = await api.getFungibleTokenUnspents(codehash, originGenesis, address.toString())
+  const queryUtxos = (g: string): Promise<any[]> =>
+    type === 'nft'
+      ? api.getNonFungibleTokenUnspents(codehash, g, address.toString())
+      : api.getFungibleTokenUnspents(codehash, g, address.toString())
+
+  // 找回utxo：初始创世 + 下一级 issue 创世
+  let genesisUtxos = await queryUtxos(originGenesis)
+  let unspent = genesisUtxos.find((v) => v.txId == genesisTxId && v.outputIndex == genesisOutputIndex)
+
+  let _dataPartObj = proto.parseDataPart(scriptBuffer)
+  _dataPartObj.sensibleID = {
+    txid: genesisTxId,
+    index: genesisOutputIndex,
   }
+  let newScriptBuf = proto.updateScript(scriptBuffer, _dataPartObj)
+  let issueGenesis = proto.getQueryGenesis(newScriptBuf)
 
-  unspent = genesisUtxos.find((v) => v.txId == genesisTxId && v.outputIndex == genesisOutputIndex)
+  // ⚠️ genesis utxo 可能已被 issue 消费，但 mvcapi 索引延迟仍返回其 unspent。
+  //    因此即使找到 genesis utxo 也要查询 issue utxo；issue 存在时以 issue 为准（链上最新）
+  let issueUtxos = await queryUtxos(issueGenesis)
 
-  if (!unspent) {
-    let _dataPartObj = proto.parseDataPart(scriptBuffer)
-    _dataPartObj.sensibleID = {
-      txid: genesisTxId,
-      index: genesisOutputIndex,
-    }
-    let newScriptBuf = proto.updateScript(scriptBuffer, _dataPartObj)
-
-    let issueGenesis = proto.getQueryGenesis(newScriptBuf)
-    let issueUtxos
-    if (type === 'nft') {
-      issueUtxos = await api.getNonFungibleTokenUnspents(codehash, issueGenesis, address.toString())
-    } else {
-      issueUtxos = await api.getFungibleTokenUnspents(codehash, issueGenesis, address.toString())
-    }
-    if (issueUtxos.length > 0) {
-      unspent = issueUtxos[0]
-    }
+  // ⚠️ issue utxo 存在多个时剔除已被消费的旧 utxo
+  //    （创世链每次 mint 消费旧创世产出新创世，理论同一时刻只有一个未花费）
+  if (issueUtxos.length > 1) {
+    issueUtxos = await filterSpentUtxos(api, issueUtxos)
+  }
+  if (issueUtxos.length > 0) {
+    unspent = issueUtxos[0]
   }
 
   if (unspent) {
@@ -282,6 +277,20 @@ async function getLatestGenesisUtxo(
       outputIndex: unspent.outputIndex,
     }
   }
+}
+
+// ⚠️ mvcapi 索引延迟可能返回已被消费的 utxo：解析各候选 tx 输入，剔除被消费的 outpoint。
+//    全部被消费时保守保留原列表（避免误删导致返回空）
+async function filterSpentUtxos(api: Api, utxos: any[]): Promise<any[]> {
+  const raws = await Promise.all(utxos.map((u) => api.getRawTxData(u.txId).catch(() => null)))
+  const consumed = new Set<string>()
+  for (const raw of raws) {
+    if (!raw) continue
+    const tx = new Transaction(raw)
+    for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+  }
+  const kept = utxos.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
+  return kept.length ? kept : utxos
 }
 
 export function parseSensibleId(sensibleId: string) {

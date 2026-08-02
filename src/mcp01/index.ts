@@ -500,6 +500,7 @@ export class NftManager {
     tokenIndex,
     senderWif,
     receiverAddress,
+    changeAddress,
     opreturnData,
     utxos: utxosInput,
     noBroadcast = false,
@@ -509,6 +510,7 @@ export class NftManager {
     tokenIndex: string
     senderWif: string
     receiverAddress: string | mvc.Address
+    changeAddress?: string | mvc.Address
     opreturnData?: any
     utxos?: any[]
     noBroadcast?: boolean
@@ -522,6 +524,11 @@ export class NftManager {
     )
 
     receiverAddress = new mvc.Address(receiverAddress, this.network)
+    if (changeAddress) {
+      changeAddress = new mvc.Address(changeAddress, this.network)
+    } else {
+      changeAddress = this.purse.address
+    }
     const { txComposer } = await this.createTransferTx({
       utxos,
       utxoPrivateKeys,
@@ -529,6 +536,7 @@ export class NftManager {
       codehash,
       tokenIndex,
       receiverAddress,
+      changeAddress,
       opreturnData,
     })
 
@@ -1814,6 +1822,7 @@ export class NftManager {
       utxoPrivateKeys,
 
       receiverAddress,
+      changeAddress: this.purse.address,
       opreturnData,
     })
 
@@ -1892,6 +1901,7 @@ export class NftManager {
 
     opreturnData = null,
     receiverAddress,
+    changeAddress,
   }: {
     utxos: Utxo[]
     utxoPrivateKeys: mvc.PrivateKey[]
@@ -1904,9 +1914,9 @@ export class NftManager {
     opreturnData?: string[] | string
 
     receiverAddress: mvc.Address
+    changeAddress: mvc.Address
   }) {
     const txComposer = new TxComposer()
-    const changeAddress = this.purse.address
 
     // prevouts
     let prevouts = new Prevouts()

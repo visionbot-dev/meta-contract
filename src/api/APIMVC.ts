@@ -325,6 +325,19 @@ export class APIMVC implements ApiBase {
       metaTxId: v.metaTxid,
       metaOutputIndex: v.metaOutputIndex,
     }))
+
+    // ⚠️ mvcapi 对刚 transfer 的 NFT 索引异常：同 tokenIndex 可能返回多个 utxo（旧已花费 + 新持有）。
+    //    解析各候选 tx 输入，剔除已被消费的旧 utxo（否则 transfer 消费旧 utxo → Missing inputs）
+    const raws = await Promise.all(ret.map((u) => this.getRawTxData(u.txId).catch(() => null)))
+    const consumed = new Set<string>()
+    for (const raw of raws) {
+      if (!raw) continue
+      const tx = new mvc.Transaction(raw)
+      for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+    }
+    const kept = ret.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
+    if (kept.length) ret = kept
+
     return ret
   }
 

@@ -277,6 +277,13 @@ async function getLatestGenesisUtxo(
       outputIndex: unspent.outputIndex,
     }
   }
+
+  // ⚠️ 兜底：genesis/issue 索引都未找到最新创世 utxo（mvcapi 索引延迟/未收录）时，
+  //    直接使用创世交易自身的创世输出，避免误判 token supply is fixed
+  return {
+    txId: genesisTxId,
+    outputIndex: genesisOutputIndex,
+  }
 }
 
 export function parseSensibleId(sensibleId: string) {

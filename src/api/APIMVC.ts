@@ -237,6 +237,19 @@ export class APIMVC implements ApiBase {
       tokenAddress: address,
       tokenAmount: v.valueString,
     }))
+    // ⚠️ mvcapi 索引延迟：FT 列表可能混入已被消费的 utxo（height 异常）。
+    //    解析候选交易输入，剔除被其他候选消费的旧 utxo（否则 transfer 引用 → Missing inputs）
+    if (ret.length > 1) {
+      const raws = await Promise.all(ret.map((u) => this.getRawTxData(u.txId).catch(() => null)))
+      const consumed = new Set<string>()
+      for (const raw of raws) {
+        if (!raw) continue
+        const tx = new mvc.Transaction(raw)
+        for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+      }
+      const kept = ret.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
+      if (kept.length) ret = kept
+    }
     return ret
   }
 
@@ -364,15 +377,31 @@ export class APIMVC implements ApiBase {
     let url = this.serverBase + path
     let _res: any = await Net.httpGet(url, { tokenIndex }, { headers: this._getHeaders(path) })
 
-    let ret = _res.map((v) => ({
+    let list = _res.map((v) => ({
       txId: v.txid,
       outputIndex: v.txIndex,
       tokenAddress: v.address,
       tokenIndex: v.tokenIndex,
       metaTxId: v.metaTxid,
       metaOutputIndex: v.metaOutputIndex,
-    }))[0]
-    return ret
+    }))
+    // ⚠️ mvcapi 对 transfer 后的 NFT 返回多个候选（旧已消费 + 新有效，height 异常）：
+    //    直接取 [0] 可能命中已消费旧 utxo → transfer 引用报 Missing inputs。解析候选交易输入剔除已消费。
+    if (list.length > 1) {
+      const consumed = new Set<string>()
+      for (const u of list) {
+        try {
+          const txHex = await this.getRawTxData(u.txId)
+          const tx = new mvc.Transaction(txHex)
+          for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+        } catch {
+          // 单笔解析失败忽略（保留该候选）
+        }
+      }
+      const kept = list.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
+      if (kept.length) list = kept
+    }
+    return list[0]
   }
 
   /**

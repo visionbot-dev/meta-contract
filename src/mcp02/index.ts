@@ -723,6 +723,13 @@ export class FtManager {
         outputIndex: unspent.outputIndex,
       }
     }
+    // ⚠️ 兜底：origin/issue 索引都未找到最新创世 utxo（mvcapi 索引延迟/未收录）时，
+    //    直接使用创世交易自身的创世输出，避免误判 token supply is fixed
+    //    （与 getLatestGenesisUtxo 的 2279be7 兜底一致；解锁依赖后续 raw tx 解析，创世输出始终存在）
+    return {
+      txId: genesisTxId,
+      outputIndex: genesisOutputIndex,
+    }
   }
 
   private async _calMintEstimateFee({

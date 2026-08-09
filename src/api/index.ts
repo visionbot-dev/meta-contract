@@ -22,6 +22,8 @@ export type NonFungibleTokenUnspent = {
   tokenIndex: string
   metaTxId: string
   metaOutputIndex: number
+  /** 所属系列（索引过滤按 genesis+tokenIndex 分组，避免跨系列同 tokenIndex 误删） */
+  genesis?: string
 }
 
 export type FungibleTokenUnspent = {

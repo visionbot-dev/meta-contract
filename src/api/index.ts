@@ -24,6 +24,8 @@ export type NonFungibleTokenUnspent = {
   metaOutputIndex: number
   /** 所属系列（索引过滤按 genesis+tokenIndex 分组，避免跨系列同 tokenIndex 误删） */
   genesis?: string
+  /** 合约 codeHash（链式回溯判定同系列 NFT 合约输出用） */
+  codeHash?: string
 }
 
 export type FungibleTokenUnspent = {

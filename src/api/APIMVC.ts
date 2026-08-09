@@ -19,6 +19,104 @@ type ResData = {
   msg: string
 }
 
+// ================================================================
+// 纯 JS 交易/合约输出解析（无 mvc-lib 依赖——链式回溯用，与 mvc-assets-indexer-sdk 一致）
+// ================================================================
+function readVarIntHex(hex: string, pos: number): { value: number; lenHex: number } {
+  const b = parseInt(hex.slice(pos, pos + 2), 16)
+  if (b < 0xfd) return { value: b, lenHex: 2 }
+  if (b === 0xfd) return { value: parseInt(hex.slice(pos + 2, pos + 6), 16), lenHex: 6 }
+  if (b === 0xfe) return { value: parseInt(hex.slice(pos + 2, pos + 10), 16), lenHex: 10 }
+  return { value: 0, lenHex: 18 }
+}
+function le8Hex(bufHex: string): bigint {
+  const bytes = bufHex.match(/.{2}/g) || []
+  return BigInt('0x' + [...bytes].reverse().join(''))
+}
+function scriptCodehashHex(scriptHex: string): string {
+  if (!scriptHex) return ''
+  let hex = scriptHex.toLowerCase()
+  let i = 0
+  if (hex.startsWith('006a')) i = 4
+  else if (hex.startsWith('6a')) i = 2
+  else return ''
+  const op = hex.slice(i, i + 2)
+  if (op === '14') return hex.slice(i + 2, i + 42)
+  if (op === '4c') {
+    const len = parseInt(hex.slice(i + 2, i + 4), 16)
+    if (len >= 20) return hex.slice(i + 4, i + 4 + 40)
+  }
+  return ''
+}
+function parseTxStruct(rawHex: string): { inputs: { prevTxId: string; outputIndex: number }[]; outputs: { scriptHex: string; satoshis: number }[] } {
+  const hex = (rawHex || '').toLowerCase()
+  let i = 8
+  const nIn = readVarIntHex(hex, i)
+  i += nIn.lenHex
+  const inputs: { prevTxId: string; outputIndex: number }[] = []
+  for (let k = 0; k < nIn.value; k++) {
+    const prevTxId = (hex.slice(i, i + 64).match(/.{2}/g) || []).reverse().join('')
+    // ⚠️ outputIndex 为 LE 4 字节（'01000000' → 1，不能 BE parseInt）
+    const voutHex = hex.slice(i + 64, i + 72)
+    const outputIndex = parseInt((voutHex.match(/.{2}/g) || []).reverse().join(''), 16)
+    i += 64 + 8
+    const sl = readVarIntHex(hex, i)
+    i += sl.lenHex + sl.value * 2 + 8
+    inputs.push({ prevTxId, outputIndex })
+  }
+  const nOut = readVarIntHex(hex, i)
+  i += nOut.lenHex
+  const outputs: { scriptHex: string; satoshis: number }[] = []
+  for (let k = 0; k < nOut.value; k++) {
+    const satoshis = Number(le8Hex(hex.slice(i, i + 16)))
+    i += 16
+    const sl = readVarIntHex(hex, i)
+    i += sl.lenHex
+    const scriptHex = hex.slice(i, i + sl.value * 2)
+    i += sl.value * 2
+    outputs.push({ scriptHex, satoshis })
+  }
+  return { inputs, outputs }
+}
+function parseContractOutput(scriptHex: string): { codehash: string; genesis: string; kind: 'nft' | 'ft' | null; addressHash160: string; tokenIndex?: number } | null {
+  if (!scriptHex) return null
+  const codehash = scriptCodehashHex(scriptHex)
+  if (!codehash) return null
+  const hex = scriptHex.toLowerCase()
+  const len = hex.length
+  const typeBuf = len >= 42 ? hex.slice(len - 42, len - 34) : ''
+  const protoType = typeBuf ? Number(le8Hex('00000000' + typeBuf) >> BigInt(32)) : 0
+  let dataStart = 0
+  if (hex.startsWith('006a')) dataStart = 4
+  else if (hex.startsWith('6a')) dataStart = 2
+  else return null
+  const firstPush = hex.slice(dataStart, dataStart + 2)
+  let codeStart = dataStart + 2
+  if (firstPush === '14') codeStart = dataStart + 2 + 40
+  else if (firstPush === '4c') {
+    const l = parseInt(hex.slice(dataStart + 2, dataStart + 4), 16)
+    codeStart = dataStart + 4 + l * 2
+  } else return null
+  const gOp = hex.slice(codeStart, codeStart + 2)
+  let genesis = ''
+  if (gOp === '14') genesis = hex.slice(codeStart + 2, codeStart + 42)
+  else if (gOp === '28') genesis = hex.slice(codeStart + 2, codeStart + 82)
+  else if (gOp === '4c') {
+    const l = parseInt(hex.slice(codeStart + 2, codeStart + 4), 16)
+    genesis = hex.slice(codeStart + 4, codeStart + 4 + l * 2)
+  } else return null
+  if (protoType === 3) {
+    if (len >= 306) {
+      const nftAddress = hex.slice(len - 234, len - 194)
+      if (/^[0-9a-f]+$/.test(nftAddress) && nftAddress.length === 40) {
+        const tokenIndexBuf = hex.slice(len - 178, len - 162)
+        return { codehash, genesis, kind: 'nft', addressHash160: nftAddress, tokenIndex: Number(le8Hex(tokenIndexBuf)) }
+      }
+    }
+  }
+  return null
+}
+
 export class APIMVC implements ApiBase {
   serverBase: string
   authorization: string
@@ -338,6 +436,7 @@ export class APIMVC implements ApiBase {
       metaTxId: v.metaTxid,
       metaOutputIndex: v.metaOutputIndex,
       genesis: v.genesis,
+      codeHash: v.codeHash,
     }))
 
     // ⚠️ mvcapi 对刚 transfer 的 NFT 索引异常：同 tokenIndex 可能返回多个 utxo（旧已花费 + 新持有），
@@ -361,15 +460,65 @@ export class APIMVC implements ApiBase {
     return Number(_res.txDetail.height)
   }
 
+  /** ⚠️ 链式回溯缓存（txid → 同系列前序 outpoint）——交易不可变，缓存安全 */
+  private _chainBackCache = new Map<string, string[]>()
+
   /**
-   * 过滤出每个 genesis+tokenIndex 的最新 unspent（对齐 mvc-assets-indexer-sdk _filterSpentNft）：
-   * 1) 从各候选 tx 解析所在区块高度；存在 height=-1（未确认，一定是刚广播给节点的最新交易）时 -1 优先，
-   *    否则保留最大 height 的候选；
-   * 2) 高度解析失败(null)不保守保留：有解析成功时排除 null（避免 mvcapi 延迟残留），全部失败时才全保留；
-   * 3) 剩余候选仍多个（同区块链/未确认链）时，解析候选交易输入构筑完整交易链，
-   *    剔除已被同组候选消费的旧 utxo（否则 transfer 消费旧 utxo → Missing inputs）；
-   * 4) 兜底：NFT 同一时刻只能有 1 个当前持有，仍多候选（解析失败 + 链回溯无法识别外部消费）时
-   *    强制取 1（未确认优先 → 高度降序 → 首个）。
+   * ⚠️ 完整链式回溯（与 mvc-assets-indexer-sdk _nftChainBack 一致）：候选 tx 沿**输入链递归**
+   * 收集同系列（codehash+genesis）NFT utxo outpoint。
+   * 判定链尾：候选的输入链中出现的**候选 outpoint** = 已被该候选消费（剔除）；
+   * 回溯到**非候选**（外部/更早——非本高度的 utxo）→ 候选是链尾（保留）。
+   * mvcapi 可能返回**断开的链**（前序交易缺失）→ 该分支停止回溯（保守保留）。
+   * 深度 ≤ 10 防环。
+   */
+  private async _nftChainBack(
+    txid: string,
+    codeHash: string,
+    genesis: string,
+    candOps: Set<string> | null,
+    depth = 0
+  ): Promise<string[]> {
+    if (depth > 10) return []
+    const cached = this._chainBackCache.get(txid)
+    if (cached) return cached
+    const raw = await this.getRawTxData(txid).catch(() => null)
+    if (!raw) return []
+    let outs: string[] = []
+    try {
+      const tx = parseTxStruct(raw)
+      for (const inp of tx.inputs) {
+        const op = `${inp.prevTxId}:${inp.outputIndex}`
+        // ⚠️ 前序 outpoint 直接匹配候选集合（候选必同系列）→ 无需解析前序 raw（断链/前序 raw 缺失也能判定消费关系）
+        if (candOps && candOps.has(op)) {
+          if (!outs.includes(op)) outs.push(op)
+          continue
+        }
+        const pRaw = await this.getRawTxData(inp.prevTxId).catch(() => null)
+        if (!pRaw) continue // 断链（前序缺失且非候选）——停止该分支
+        const pTx = parseTxStruct(pRaw)
+        if (inp.outputIndex >= pTx.outputs.length) continue
+        const c = parseContractOutput(pTx.outputs[inp.outputIndex].scriptHex)
+        if (c && c.kind === 'nft' && c.codehash.toLowerCase() === codeHash.toLowerCase() && c.genesis.toLowerCase() === genesis.toLowerCase()) {
+          if (!outs.includes(op)) outs.push(op)
+          const sub = await this._nftChainBack(inp.prevTxId, codeHash, genesis, candOps, depth + 1)
+          for (const s of sub) if (!outs.includes(s)) outs.push(s)
+        }
+      }
+    } catch {
+      /* 单笔解析失败——返回已收集的 */
+    }
+    if (this._chainBackCache.size > 2000) this._chainBackCache.clear()
+    this._chainBackCache.set(txid, outs)
+    return outs
+  }
+
+  /**
+   * ⚠️ NFT 索引延迟过滤（对齐 mvc-assets-indexer-sdk _filterSpentNft）：同 genesis+tokenIndex 多候选——
+   * 通过 input 构建**完整链式回溯**（单个 utxo 回溯到非所在高度的 utxo 或回溯到 mvcapi 列表内的 utxo）：
+   * - 候选 X 的输入链（递归同系列）中出现候选 Y → Y 已被 X 的链消费（剔除）
+   * - 回溯到非候选（外部更早 utxo——非本高度）→ X 是链尾（保留）
+   * - mvcapi 返回断开的链（前序缺失）→ 分支停止，保守保留
+   * 高度作为辅助兜底（断链/全同高时取最新：-1 未确认优先 → 高度降序 → 首个）
    */
   private async _filterLatestNftUnspents(list: NonFungibleTokenUnspent[]): Promise<NonFungibleTokenUnspent[]> {
     // ⚠️ 必须按 genesis+tokenIndex 分组——不同系列的同 tokenIndex 互不消费，混组会导致跨系列误删
@@ -387,46 +536,33 @@ export class APIMVC implements ApiBase {
         kept.push(...group)
         continue
       }
-      // 1) 解析各候选所在区块高度（-1 = 未确认；解析失败置 null）
-      const heights = await Promise.all(group.map((u) => this._getTxHeight(u.txId).catch(() => null)))
-      // 2) 保留最新候选：存在 -1 时 -1 优先——未确认 tx 一定是刚广播给节点的最新交易，
-      //    已确认候选不可能比它新，直接排除；否则保留最大 height 的候选
-      const hasUnconfirmed = heights.some((h) => h === -1)
-      const targetHeight = hasUnconfirmed
-        ? -1
-        : heights.reduce((m, h) => (h != null && h !== -1 && (m === null || h > m) ? h : m), null)
-      const hasAnyParsed = heights.some((h) => h != null)
-      let candidates = group.filter((_, i) => {
-        const h = heights[i]
-        // ⚠️ 高度解析失败(null)不保守保留：有解析成功时排除 null（避免 mvcapi 延迟残留）；
-        //    全部失败时才全保留（退化为链回溯兜底）
-        if (h != null) return h === targetHeight
-        return !hasAnyParsed
-      })
-      // 3) 同高度候选仍多个时，构筑交易链剔除已被同组候选消费的旧 utxo
-      if (candidates.length > 1) {
-        const raws = await Promise.all(candidates.map((u) => this.getRawTxData(u.txId).catch(() => null)))
-        const consumed = new Set<string>()
-        for (const raw of raws) {
-          if (!raw) continue
-          const tx = new mvc.Transaction(raw)
-          for (const inp of tx.inputs) consumed.add(inp.prevTxId.toString('hex') + ':' + Number(inp.outputIndex))
+      // 1) 解析各候选高度（链尾辅助：最高或 -1 未确认可能最新）
+      //    ⚠️ 解析失败标记 -999（未知——排最后）——不能保留原始 -1（接口的 -1 可能是未确认也可能是残留）
+      const heights = await Promise.all(group.map((u) => this._getTxHeight(u.txId).then((h) => h, () => -999)))
+      // 2) 完整链式回溯：候选输入链中的候选 outpoint = 被消费（剔除）
+      const codeHash = String(group[0].codeHash || '')
+      const genesis = String(group[0].genesis || '')
+      const candOps = new Set(group.map((u) => `${u.txId}:${Number(u.outputIndex)}`))
+      const consumed = new Set<string>()
+      for (const u of group) {
+        try {
+          const chain = await this._nftChainBack(u.txId, codeHash, genesis, candOps)
+          for (const op of chain) if (candOps.has(op)) consumed.add(op)
+        } catch {
+          /* 单候选回溯失败忽略 */
         }
-        const tips = candidates.filter((u) => !consumed.has(u.txId + ':' + Number(u.outputIndex)))
-        if (tips.length) candidates = tips
       }
-      // 4) 兜底：同 tokenIndex 的 NFT 同一时刻只能有 1 个当前持有——
-      //    仍多候选（高度解析失败 + 链回溯无法识别外部消费）→ 强制取 1（未确认优先 → 高度降序 → 首个）
+      let candidates = group.filter((u) => !consumed.has(`${u.txId}:${Number(u.outputIndex)}`))
+      // 3) 兜底：仍多候选（断链/无法判定）→ 按高度取最新（-1 优先 → 高度降序 → 首个）
       if (candidates.length > 1) {
         candidates = [
           candidates.sort((a, b) => {
-            const ha = heights[group.indexOf(a)]
-            const hb = heights[group.indexOf(b)]
-            const rank = (h: number | null) => (h === -1 ? Number.MAX_SAFE_INTEGER : h == null ? -1 : h)
-            return rank(hb) - rank(ha)
+            const rank = (h: number) => (h === -1 ? Number.MAX_SAFE_INTEGER : h > 0 ? h : -1)
+            return rank(heights[group.indexOf(b)]) - rank(heights[group.indexOf(a)])
           })[0],
         ]
       }
+      if (!candidates.length) candidates = [group[0]] // 全被消费兜底
       kept.push(...candidates)
     }
     return kept
@@ -448,6 +584,7 @@ export class APIMVC implements ApiBase {
       metaTxId: v.metaTxid,
       metaOutputIndex: v.metaOutputIndex,
       genesis: v.genesis,
+      codeHash: v.codeHash,
     }))
     // ⚠️ mvcapi 对 transfer 后的 NFT 返回多个候选（旧已消费 + 新有效，消费链可能断开）：
     //    按区块高度 + 交易链过滤出最新 unspent，避免取到已消费旧 utxo → transfer 引用报 Missing inputs。

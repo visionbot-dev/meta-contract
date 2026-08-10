@@ -274,19 +274,20 @@ export class APIMVC implements ApiBase {
    * @param {string} txid
    */
   public async getRawTxData(txid: string): Promise<string> {
-    // let path = `/tx/${txid}/raw`
-    let url = `https://www.metalet.space/wallet-api/v4/mvc/tx/raw`
+    // ⚠️ 修复：原硬编码 metalet.space（mempool 交易不可读 → _res.data.hex 对 metalet 响应也解包错误 → null.hex）。
+    //    改用 serverBase + mvcapi 路径（apiHost 本地索引/官方 mvcapi——mempool 可见），与 MVC 类对齐
+    let path = `/tx/${txid}/raw`
+    let url = this.serverBase + path
 
     let _res: any = await Net.httpGet(
       url,
+      {},
       {
-        net: this.network,
-        txId: txid,
-      },
-      {}
+        headers: this._getHeaders(path),
+      }
     )
 
-    return _res.data.hex
+    return _res.hex
   }
 
   /**

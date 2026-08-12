@@ -8,26 +8,13 @@
     "node": ">=12.0.0"
   },
   "scripts": {
-    "compile-bcp01": "node tools/compiler.js --bcp01",
-    "compile-bcp01-dev": "node tools/compiler.js --bcp01 --debug",
-    "compile-bcp02": "node tools/compiler.js --bcp02",
-    "compile-bcp02-dev": "node tools/compiler.js --bcp02  --debug",
     "compile-mcp01": "node tools/compiler.js --mcp01",
     "compile-mcp01-dev": "node tools/compiler.js --mcp01  --debug",
     "compile-mcp02": "node tools/compiler.js --mcp02",
     "compile-mcp02-dev": "node tools/compiler.js --mcp02  --debug",
     "build": "npx gulp",
     "build:watch": "gulp dev",
-    "rollup": "rollup --config",
-    "stest": "mocha -r ts-node/register tests/**/*scrypttest.*  --reporter spec --timeout 600000",
-    "stest-ft-genesis": "mocha -r ts-node/register tests/scrypt/tokenGenesis.scrypttest.ts --watch --reporter spec --timeout 600000",
-    "stest-nft-genesis": "mocha -r ts-node/register tests/scrypt/nftGenesis.scrypttest.ts --watch --reporter spec --timeout 600000",
-    "stest-ft": "mocha -r ts-node/register tests/scrypt/token.scrypttest.ts --watch --reporter spec --timeout 600000",
-    "atest": "mocha -r ts-node/register tests/acceptance/**/*.test.ts --timeout 600000",
-    "atest-ft": "mocha -r ts-node/register tests/acceptance/bcp02/ft.test.ts --timeout 5000000 --debugUri ",
-    "atest-nft": "mocha -r ts-node/register tests/acceptance/bcp01/nft.test.ts --timeout 5000000 --debugUri ",
-    "atest-wallet": "mocha -r ts-node/register tests/acceptance/others/wallet.test.ts --timeout 5000000 --debugUri ",
-    "jw": "jest --watchAll"
+    "rollup": "rollup --config"
   },
   "keywords": [
     "Smart Contract",
@@ -42,8 +29,7 @@
   "author": "MVC-Labs",
   "license": "MIT",
   "dependencies": {
-    "mvc-scrypt": "0.1.2",
-    "node-fetch": "2"
+    "mvc-scrypt": "0.1.2"
   },
   "devDependencies": {
     "@types/chai": "^4.2.20",

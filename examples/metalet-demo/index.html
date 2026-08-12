@@ -22,7 +22,7 @@
   <script type="text/babel" data-presets="react">
     const { useState, useCallback, useEffect, useRef, createElement: h } = React;
     const _mc = window.metaContract || window.sensible || {};
-    const { NftManager, FtManager, MetaletSigner, API_TARGET, mvc } = _mc;
+    const { NftManager, FtManager, MetaletSigner, mvc } = _mc;
 
     // ─── utils ─────────────────────────────────────────────
 
@@ -209,7 +209,7 @@
           const signerInstance = signer();
 
           const ft = new FtManager({
-            network, apiTarget: API_TARGET.APIMVC, signer: signerInstance, feeb: 1,
+            network, signer: signerInstance, feeb: 1,
           });
 
           const ftUtxos = [{
@@ -288,7 +288,7 @@
           const signerInstance = signer();
 
           const nft = new NftManager({
-            network, apiTarget: API_TARGET.APIMVC, signer: signerInstance, feeb: 1,
+            network, signer: signerInstance, feeb: 1,
           });
 
           onLog('info', `转移 Token#${form.tokenIndex} → ${fmtAddr(form.receiver)}`);

@@ -1,13 +1,9 @@
 import { Address, PrivateKey, Script, Transaction } from '../mvc'
 import { CodeError, ErrCode } from '../common/error'
-import { Api, API_NET, BN, TxComposer } from '..'
+import { BN, TxComposer } from '..'
 import { CONTRACT_TYPE, sighashType } from '../common/utils'
 import { ContractAdapter } from '../common/ContractAdapter'
 import { DustCalculator } from '../common/DustCalculator'
-import { NftGenesisFactory } from '../mcp01/contract-factory/nftGenesis'
-import { TokenGenesisFactory } from '../mcp02/contract-factory/tokenGenesis'
-import * as nftProto from '../mcp01/contract-proto/nft.proto'
-import * as ftProto from '../mcp02/contract-proto/token.proto'
 import * as mvc from '../mvc'
 
 type Utxo = {
@@ -17,46 +13,33 @@ type Utxo = {
   address: Address
 }
 
-type Purse = {
-  privateKey: PrivateKey
-  address: Address
-}
-
-export async function prepareUtxos(
-  purse: Purse,
-  api: Api,
-  network: API_NET,
-  utxosInput?: any[]
-): Promise<{
+/**
+ * 准备 SPACE utxo（用于支付 gas）。
+ *
+ * ⚠️ 本 SDK 不做任何链上查询：utxos 必须由外部业务层传入。
+ * 每个 utxo 可通过 `wif` 提供私钥（自动推导地址），也可显式提供 `address`。
+ */
+export function prepareUtxos(utxosInput: any[]): {
   utxos: Utxo[]
   utxoPrivateKeys: PrivateKey[]
-}> {
-  let utxoPrivateKeys = []
-
-  if (utxosInput) {
-    utxosInput.forEach((utxo) => {
-      if (utxo.wif) {
-        let privateKey = mvc.PrivateKey.fromWIF(utxo.wif)
-        utxoPrivateKeys.push(privateKey)
-        utxo.address = privateKey.toAddress(network) //Compatible with the old version, only wif is provided but no address is provided
-      }
-    })
-
-    return {
-      utxos: utxosInput,
-      utxoPrivateKeys,
-    }
+} {
+  if (!utxosInput || !utxosInput.length) {
+    throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'utxos must be provided by the external layer.')
   }
 
-  const utxos: any[] = await api.getUnspents(purse.address.toString())
-  utxos.forEach((utxo) => {
-    utxoPrivateKeys.push(purse.privateKey)
-    utxo.address = new Address(utxo.address, network)
+  const utxoPrivateKeys: PrivateKey[] = []
+  utxosInput.forEach((utxo) => {
+    if (utxo.wif) {
+      let privateKey = mvc.PrivateKey.fromWIF(utxo.wif)
+      utxoPrivateKeys.push(privateKey)
+      utxo.address = privateKey.toAddress(undefined as any) //Compatible with the old version, only wif is provided but no address is provided
+    }
   })
 
-  if (utxos.length == 0) throw new CodeError(ErrCode.EC_INSUFFICIENT_MVC, 'Insufficient balance.')
-
-  return { utxos, utxoPrivateKeys }
+  return {
+    utxos: utxosInput,
+    utxoPrivateKeys,
+  }
 }
 
 export function addP2PKHInputs(txComposer: TxComposer, utxos: Utxo[]) {
@@ -144,145 +127,52 @@ export function checkFeeRate(txComposer: TxComposer, feeb) {
   }
 }
 
-export async function getNftInfo({
-  tokenIndex,
-  codehash,
-  genesis,
-  api,
-  network,
+/**
+ * 从外部传入的创世 utxo（自带交易 hex）解析出最新创世信息。
+ *
+ * ⚠️ 本 SDK 不做链上查询：genesisUtxo 必须由外部业务层传入，
+ *    其中 txHex / preTxHex 用于本地构造解锁证明所需的 satotxInfo。
+ */
+export function buildGenesisInfoFromUtxo({
+  genesisUtxo,
 }: {
-  tokenIndex: string
-  codehash: string
-  genesis: string
-  api: Api
-  network: API_NET
-}) {
-  let _res = await api.getNonFungibleTokenUnspentDetail(codehash, genesis, tokenIndex)
-  let nftUtxo: any = {
-    txId: _res.txId,
-    outputIndex: _res.outputIndex,
-    nftAddress: new Address(_res.tokenAddress, network),
+  genesisUtxo: any
+}): {
+  genesisTxId: string
+  genesisOutputIndex: number
+  genesisUtxo: any
+} {
+  if (!genesisUtxo || !genesisUtxo.txHex || !genesisUtxo.preTxHex) {
+    throw new CodeError(
+      ErrCode.EC_INVALID_ARGUMENT,
+      'genesisUtxo must be provided by the external layer, including txHex and preTxHex.'
+    )
   }
 
-  return { nftUtxo }
-}
+  const genesisTx = new Transaction(genesisUtxo.txHex)
+  const outputIndex = genesisUtxo.outputIndex
+  const output = genesisTx.outputs[outputIndex]
+  const preTxId = genesisTx.inputs[0].prevTxId.toString('hex')
+  const preOutputIndex = genesisTx.inputs[0].outputIndex
 
-// 获取最新的创世合约及tx信息
-export async function getLatestGenesisInfo({
-  sensibleId,
-  api,
-  address,
-  type,
-}: {
-  sensibleId: string
-  api: Api
-  address: Address
-  type: string
-}) {
-  const factory = type === 'nft' ? NftGenesisFactory : TokenGenesisFactory
-  const proto = type === 'nft' ? nftProto : ftProto
-  let genesisContract = factory.createContract()
-
-  let { genesisTxId, genesisOutputIndex } = parseSensibleId(sensibleId)
-  let genesisUtxo = await getLatestGenesisUtxo(
-    proto,
-    genesisContract.getCodeHash(),
-    genesisTxId,
-    genesisOutputIndex,
-    api,
-    address,
-    type
-  )
-
-  if (!genesisUtxo) {
-    throw new CodeError(ErrCode.EC_FIXED_TOKEN_SUPPLY, 'token supply is fixed')
-  }
-  let txHex = await api.getRawTxData(genesisUtxo.txId)
-  const tx = new Transaction(txHex)
-  let preTxId = tx.inputs[0].prevTxId.toString('hex')
-  let preOutputIndex = tx.inputs[0].outputIndex
-  let preTxHex = await api.getRawTxData(preTxId)
-  genesisUtxo.satotxInfo = {
+  const satotxInfo = {
     txId: genesisUtxo.txId,
-    outputIndex: genesisUtxo.outputIndex,
-    txHex,
+    outputIndex,
+    txHex: genesisUtxo.txHex,
     preTxId,
     preOutputIndex,
-    preTxHex,
+    preTxHex: genesisUtxo.preTxHex,
+    tx: genesisTx,
   }
 
-  let output = tx.outputs[genesisUtxo.outputIndex]
+  genesisUtxo.satotxInfo = satotxInfo
   genesisUtxo.satoshis = output.satoshis
   genesisUtxo.lockingScript = output.script
-  genesisContract.setFormatedDataPartFromLockingScript(genesisUtxo.lockingScript)
 
   return {
-    genesisContract,
-    genesisTxId,
-    genesisOutputIndex,
+    genesisTxId: genesisUtxo.txId,
+    genesisOutputIndex: outputIndex,
     genesisUtxo,
-  }
-}
-
-async function getLatestGenesisUtxo(
-  proto: any,
-  codehash: string,
-  genesisTxId: string,
-  genesisOutputIndex: number,
-  api: Api,
-  address: Address,
-  type: string
-): Promise<any> {
-  // 使用创世txid从接口获取该创世tx内容
-  let latestGenesisTxHex = await api.getRawTxData(genesisTxId)
-  let latestGenesisTx = new Transaction(latestGenesisTxHex)
-
-  // 重新构建该创世脚本
-  let scriptBuffer = latestGenesisTx.outputs[genesisOutputIndex].script.toBuffer()
-  let originGenesis = proto.getQueryGenesis(scriptBuffer)
-
-  const queryUtxos = (g: string): Promise<any[]> =>
-    type === 'nft'
-      ? api.getNonFungibleTokenUnspents(codehash, g, address.toString())
-      : api.getFungibleTokenUnspents(codehash, g, address.toString())
-
-  // 找回utxo：初始创世 + 下一级 issue 创世
-  let genesisUtxos = await queryUtxos(originGenesis)
-  let unspent = genesisUtxos.find((v) => v.txId == genesisTxId && v.outputIndex == genesisOutputIndex)
-
-  let _dataPartObj = proto.parseDataPart(scriptBuffer)
-  _dataPartObj.sensibleID = {
-    txid: genesisTxId,
-    index: genesisOutputIndex,
-  }
-  let newScriptBuf = proto.updateScript(scriptBuffer, _dataPartObj)
-  let issueGenesis = proto.getQueryGenesis(newScriptBuf)
-
-  // ⚠️ genesis utxo 可能已被 issue 消费，但 mvcapi 索引延迟仍返回其 unspent。
-  //    因此即使找到 genesis utxo 也要查询 issue utxo；issue 存在时以 issue 为准（链上最新）
-  let issueUtxos = await queryUtxos(issueGenesis)
-
-  // ⚠️ issue utxo 存在多个时保留 tokenIndex 最大的（创世链每次 mint 消费旧创世产出新创世，
-  //    tokenIndex 单调递增，最大者即链的最新端点；其余为索引延迟残留的已消费旧 utxo）
-  if (issueUtxos.length > 1) {
-    issueUtxos = [issueUtxos.reduce((a, b) => (new BN(b.tokenIndex).gt(new BN(a.tokenIndex)) ? b : a))]
-  }
-  if (issueUtxos.length > 0) {
-    unspent = issueUtxos[0]
-  }
-
-  if (unspent) {
-    return {
-      txId: unspent.txId,
-      outputIndex: unspent.outputIndex,
-    }
-  }
-
-  // ⚠️ 兜底：genesis/issue 索引都未找到最新创世 utxo（mvcapi 索引延迟/未收录）时，
-  //    直接使用创世交易自身的创世输出，避免误判 token supply is fixed
-  return {
-    txId: genesisTxId,
-    outputIndex: genesisOutputIndex,
   }
 }
 

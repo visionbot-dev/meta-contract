@@ -1,7 +1,7 @@
 import { DustCalculator } from '../common/DustCalculator'
 import { sighashType, TxComposer } from '../tx-composer'
 import * as mvc from '../mvc'
-import { BN, API_NET, Api, API_TARGET } from '..'
+import { BN, API_NET } from '..'
 import { ISigner, LocalSigner } from '../signer'
 
 import { NftGenesis, NftGenesisFactory } from './contract-factory/nftGenesis'
@@ -12,9 +12,8 @@ import {
   addContractOutput,
   addOpreturnOutput,
   addP2PKHInputs,
+  buildGenesisInfoFromUtxo,
   checkFeeRate,
-  getLatestGenesisInfo,
-  getNftInfo,
   prepareUtxos,
   unlockP2PKHInputs,
 } from '../helpers/transactionHelpers'
@@ -47,7 +46,6 @@ import {
 } from '../common/utils'
 import { Prevouts } from '../common/Prevouts'
 import { CodeError, ErrCode } from '../common/error'
-import { NonFungibleTokenUnspent } from '../api'
 import { SizeTransaction } from '../common/SizeTransaction'
 import { hasProtoFlag } from '../common/protoheader'
 import {
@@ -97,6 +95,8 @@ type SellUtxo = {
   outputIndex: number
   sellerAddress: string
   price: number
+  /** 挂单交易原始 hex（由外部业务层传入，用于重建锁定脚本） */
+  txHex?: string
 }
 
 export type NftUtxo = {
@@ -130,39 +130,25 @@ export class NftManager {
   private network: API_NET
   private purse: Purse
   private feeb: number
-  private _api: Api
   private debug: boolean
   private unlockContractCodeHashArray: Bytes[]
   private signer?: ISigner
-
-  get api() {
-    return this._api
-  }
-
-  get sensibleApi() {
-    return this._api
-  }
 
   constructor({
     purse,
     signer,
     network = API_NET.MAIN,
-    apiTarget = API_TARGET.MVC,
-    apiHost,
     feeb = FEEB,
     debug = false,
   }: {
     purse?: string
     signer?: ISigner
     network?: API_NET
-    apiTarget?: API_TARGET
-    apiHost?: string
     feeb?: number
     debug?: boolean
   }) {
     this.dustCalculator = new DustCalculator(Transaction.DUST_AMOUNT, null)
     this.network = network
-    this._api = new Api(network, apiTarget, apiHost)
     this.unlockContractCodeHashArray = ContractUtil.unlockContractCodeHashArray
 
     if (feeb) this.feeb = feeb
@@ -213,26 +199,18 @@ export class NftManager {
 
   async getIssueEstimateFee({
     sensibleId,
+    genesisUtxo,
     opreturnData,
     utxoMaxCount = 10,
   }: {
     sensibleId: string
+    genesisUtxo: any
     opreturnData?: any
     utxoMaxCount?: number
   }) {
-    const { genesisUtxo } = (await getLatestGenesisInfo({
-      sensibleId,
-      api: this.api,
-      address: this.purse.address,
-      type: 'nft',
-    })) as {
-      genesisContract: NftGenesis
-      genesisUtxo: Utxo
-      genesisTxId: string
-      genesisOutputIndex: number
-    }
+    const { genesisUtxo: preparedGenesisUtxo } = buildGenesisInfoFromUtxo({ genesisUtxo })
     return await this._calIssueEstimateFee({
-      genesisUtxoSatoshis: genesisUtxo.satoshis,
+      genesisUtxoSatoshis: preparedGenesisUtxo.satoshis,
       opreturnData,
       utxoMaxCount,
     })
@@ -242,22 +220,17 @@ export class NftManager {
     tokenIndex,
     codehash,
     genesis,
+    nftUtxo,
     opreturnData,
     utxoMaxCount = 10,
   }: {
     tokenIndex: string
     codehash: string
     genesis: string
+    nftUtxo: any
     opreturnData?: any
     utxoMaxCount?: number
   }) {
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
     const genesisScript = new Bytes(nftUtxo.preLockingScript.toHex())
 
@@ -276,7 +249,6 @@ export class NftManager {
     opreturnData,
     utxos: utxosInput,
     changeAddress,
-    noBroadcast = false,
     calcFee = false,
   }: {
     version?: number
@@ -285,7 +257,6 @@ export class NftManager {
     changeAddress?: string | mvc.Address
     opreturnData?: any
     utxos?: any[]
-    noBroadcast?: boolean
     calcFee?: boolean
   }) {
     if (calcFee) {
@@ -295,12 +266,7 @@ export class NftManager {
       }
     }
 
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (changeAddress) {
       changeAddress = new mvc.Address(changeAddress, this.network)
     } else {
@@ -329,10 +295,6 @@ export class NftManager {
     }
 
     let txHex = txComposer.getRawHex()
-    let txid
-    if (!noBroadcast) {
-      txid = await this.api.broadcast(txHex)
-    }
 
     let { codehash, genesis, sensibleId } = getGenesisIdentifiers({
       version,
@@ -350,7 +312,6 @@ export class NftManager {
       txid: txComposer.tx.id,
       txHex,
       genesisContract,
-      broadcastStatus: noBroadcast ? 'pending' : txid ? 'success' : 'fail',
     }
   }
 
@@ -412,39 +373,34 @@ export class NftManager {
   public async mint({
     version = 2,
     sensibleId,
+    genesisUtxo,
     metaTxId,
     metaOutputIndex,
     opreturnData,
     utxos: utxosInput,
     receiverAddress,
     changeAddress,
-    noBroadcast = false,
     calcFee = false,
   }: {
     version?: number
     sensibleId: string
+    genesisUtxo: any
     metaTxId: string
     metaOutputIndex: number
     opreturnData?: any
     utxos?: any[]
     receiverAddress?: string | mvc.Address
     changeAddress?: string | mvc.Address
-    noBroadcast?: boolean
     calcFee?: boolean
   }) {
     if (calcFee) {
       return {
-        fee: await this.getIssueEstimateFee({ sensibleId, opreturnData }),
+        fee: await this.getIssueEstimateFee({ sensibleId, genesisUtxo, opreturnData }),
         feeb: this.feeb,
       }
     }
 
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
 
     const genesisPrivateKey = this.purse.privateKey
     const genesisPublicKey = genesisPrivateKey.toPublicKey()
@@ -465,6 +421,7 @@ export class NftManager {
         utxos,
         utxoPrivateKeys,
         sensibleId,
+        genesisUtxo,
         metaTxId,
         metaOutputIndex,
         opreturnData,
@@ -479,6 +436,7 @@ export class NftManager {
       utxos,
       utxoPrivateKeys,
       sensibleId,
+      genesisUtxo,
       metaTxId,
       metaOutputIndex,
       opreturnData,
@@ -487,9 +445,6 @@ export class NftManager {
     })
 
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      const res = await this.api.broadcast(txHex)
-    }
 
     return { txHex, txid: txComposer.getTxId(), tx: txComposer.getTx(), tokenIndex }
   }
@@ -498,30 +453,25 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
     senderWif,
     receiverAddress,
     changeAddress,
     opreturnData,
     utxos: utxosInput,
-    noBroadcast = false,
   }: {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     senderWif: string
     receiverAddress: string | mvc.Address
     changeAddress?: string | mvc.Address
     opreturnData?: any
     utxos?: any[]
-    noBroadcast?: boolean
   }) {
     const startTime = Date.now()
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
 
     receiverAddress = new mvc.Address(receiverAddress, this.network)
     if (changeAddress) {
@@ -535,15 +485,13 @@ export class NftManager {
       genesis,
       codehash,
       tokenIndex,
+      nftUtxo,
       receiverAddress,
       changeAddress,
       opreturnData,
     })
 
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(txHex)
-    }
 
     const runtime = Date.now() - startTime
 
@@ -554,13 +502,13 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
     sellerWif,
     price,
 
     changeAddress,
     opreturnData,
     utxos: utxosInput,
-    noBroadcast = false,
 
     middleChangeAddress,
     middleWif,
@@ -568,13 +516,13 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     sellerWif: string
     price: number
 
     changeAddress?: string | mvc.Address
     opreturnData?: string[] | string
     utxos?: any[]
-    noBroadcast?: boolean
 
     middleChangeAddress?: string | mvc.Address
     middleWif?: string
@@ -592,12 +540,7 @@ export class NftManager {
     }
 
     // 准备钱💰；utxo不能超过3个
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (utxos.length > 3) {
       throw new CodeError(
         ErrCode.EC_UTXOS_MORE_THAN_3,
@@ -608,13 +551,7 @@ export class NftManager {
     // 检查此NFT是否属于卖家
     const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
     const sellerPublicKey = sellerPrivateKey.publicKey
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
+    nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
     if (nftUtxo.nftAddress.toString() != sellerPublicKey.toAddress(this.network).toString()) {
       throw new CodeError(
@@ -659,10 +596,6 @@ export class NftManager {
 
     let nftSellTxHex = sellTxComposer.getRawHex()
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(nftSellTxHex)
-      await this.api.broadcast(txHex)
-    }
 
     const runtime = Date.now() - startTime
 
@@ -681,6 +614,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
 
     sellerWif,
 
@@ -689,7 +623,6 @@ export class NftManager {
     opreturnData,
     utxos: utxosInput,
     changeAddress,
-    noBroadcast = false,
 
     middleChangeAddress,
     middlePrivateKey,
@@ -697,13 +630,13 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     sellerWif?: string | mvc.PrivateKey
     opreturnData?: any
     utxos?: any[]
     changeAddress?: string | mvc.Address
-    noBroadcast?: boolean
 
-    sellUtxo?: SellUtxo
+    sellUtxo: SellUtxo
     middleChangeAddress?: string | mvc.Address
     middlePrivateKey?: string | mvc.PrivateKey
   }) {
@@ -714,12 +647,7 @@ export class NftManager {
     const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
 
     // 准备钱💰；utxo不能超过3个
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (utxos.length > 3) {
       throw new CodeError(
         ErrCode.EC_UTXOS_MORE_THAN_3,
@@ -750,6 +678,7 @@ export class NftManager {
       genesis,
       codehash,
       tokenIndex,
+      nftUtxo,
       sellUtxo,
 
       sellerPrivateKey,
@@ -762,10 +691,6 @@ export class NftManager {
 
     let unlockCheckTxHex = unlockCheckTxComposer.getRawHex()
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(unlockCheckTxHex)
-      await this.api.broadcast(txHex)
-    }
 
     const runtime = Date.now() - startTime
     return {
@@ -786,6 +711,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
     sellUtxo,
 
     sellerPrivateKey,
@@ -801,7 +727,8 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
-    sellUtxo?: SellUtxo
+    nftUtxo: any
+    sellUtxo: SellUtxo
 
     sellerPrivateKey?: mvc.PrivateKey
     opreturnData?: any
@@ -811,33 +738,18 @@ export class NftManager {
     middleChangeAddress: mvc.Address
   }) {
     const version = determineCodehashVersion(codehash)
-    // 第一步：找回并准备NFT Utxo
-    // 1.1 找回nft Utxo
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
-    // 1.2 验证nft Utxo
+    // 第一步：准备NFT Utxo（由外部传入并携带 satotxInfo）
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
-    // 第二步：找到并重建销售utxo
-    // 2.1 查找销售utxo
-    if (!sellUtxo) {
-      sellUtxo = await this.api.getNftSellUtxo(codehash, genesis, tokenIndex)
-    }
-    if (!sellUtxo) {
+    // 第二步：重建销售utxo（sellUtxo 由外部传入并携带 txHex）
+    let nftAddress = sellerPrivateKey.toAddress(this.network)
+    if (!sellUtxo.txHex) {
       throw new CodeError(
-        ErrCode.EC_NFT_NOT_ON_SELL,
-        'The NFT is not for sale because the corresponding SellUtxo cannot be found.'
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo.txHex must be provided by the external layer.'
       )
     }
-    // 2.2 重建销售utxo
-    let nftAddress = sellerPrivateKey.toAddress(this.network)
-    let nftSellTxHex = await this.api.getRawTxData(sellUtxo.txId)
-    let nftSellTx = new mvc.Transaction(nftSellTxHex)
+    let nftSellTx = new mvc.Transaction(sellUtxo.txHex)
     let nftSellUtxo = {
       txId: sellUtxo.txId,
       outputIndex: sellUtxo.outputIndex,
@@ -1135,6 +1047,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
 
     buyerWif,
     buyerAddress,
@@ -1143,7 +1056,6 @@ export class NftManager {
     opreturnData,
     utxos: utxosInput,
     changeAddress,
-    noBroadcast = false,
 
     middleChangeAddress,
     middleWif,
@@ -1158,15 +1070,15 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
 
     buyerWif?: string
     buyerAddress?: string | mvc.Address
 
-    sellUtxo?: SellUtxo
+    sellUtxo: SellUtxo
     opreturnData?: any
     utxos?: any[]
     changeAddress?: string | mvc.Address
-    noBroadcast?: boolean
 
     middleChangeAddress?: string | mvc.Address
     middleWif?: string
@@ -1183,12 +1095,7 @@ export class NftManager {
     // checkParamCodehash(codehash)
 
     // 准备钱💰
-    const { utxos, utxoPrivateKeys } = await prepareUtxos(
-      this.purse,
-      this.api,
-      this.network,
-      utxosInput
-    )
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (utxos.length > 3) {
       throw new CodeError(
         ErrCode.EC_UTXOS_MORE_THAN_3,
@@ -1220,14 +1127,10 @@ export class NftManager {
       middlePrivateKey = utxoPrivateKeys[0]
     }
 
-    // 查找销售utxo
-    if (!sellUtxo) {
-      sellUtxo = await this.api.getNftSellUtxo(codehash, genesis, tokenIndex)
-    }
     if (!sellUtxo) {
       throw new CodeError(
-        ErrCode.EC_NFT_NOT_ON_SELL,
-        'The NFT is not for sale because the corresponding SellUtxo cannot be found.'
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo must be provided by the external layer.'
       )
     }
     const price = sellUtxo.price
@@ -1250,6 +1153,7 @@ export class NftManager {
       genesis,
       codehash,
       tokenIndex,
+      nftUtxo,
       sellUtxo,
 
       buyerAddress,
@@ -1269,10 +1173,6 @@ export class NftManager {
 
     let unlockCheckTxHex = unlockCheckTxComposer.getRawHex()
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(unlockCheckTxHex)
-      await this.api.broadcast(txHex)
-    }
 
     const runtime = Date.now() - startTime
     return {
@@ -1293,6 +1193,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
     sellUtxo,
 
     buyerAddress,
@@ -1315,7 +1216,8 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
-    sellUtxo?: SellUtxo
+    nftUtxo: any
+    sellUtxo: SellUtxo
 
     buyerAddress: mvc.Address
     opreturnData?: any
@@ -1332,26 +1234,18 @@ export class NftManager {
     creatorFeeRate?: number
   }): Promise<{ unlockCheckTxComposer: TxComposer; txComposer: TxComposer }> {
     const version = determineCodehashVersion(codehash)
-    
-    // 第一步：找回并准备NFT Utxo
-    // 1.1 找回nft Utxo
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
 
-    // 1.2 验证nft Utxo
+    // 第一步：准备NFT Utxo（由外部传入并携带 satotxInfo）
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
-    // 第二步：找到并重建销售utxo
-    // 2.1 查找销售utxo的步骤在上面已经完成（为了拿到价格，进行版税费用检查）
-
-    // 2.2 重建销售utxo
-    let nftSellTxHex = await this.api.getRawTxData(sellUtxo.txId)
-    let nftSellTx = new mvc.Transaction(nftSellTxHex)
+    // 第二步：重建销售utxo（sellUtxo 由外部传入并携带 txHex）
+    if (!sellUtxo.txHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo.txHex must be provided by the external layer.'
+      )
+    }
+    let nftSellTx = new mvc.Transaction(sellUtxo.txHex)
     let nftSellUtxo = {
       txId: sellUtxo.txId,
       outputIndex: sellUtxo.outputIndex,
@@ -1700,20 +1594,7 @@ export class NftManager {
   }) {
     const priceNum = price
 
-    // 第一步：找回nft Utxo并验证，验证钱是否足够
-    // 1.1 找回nft Utxo
-    if (!nftUtxo) {
-      let nftRes = await getNftInfo({
-        tokenIndex,
-        codehash,
-        genesis,
-        api: this.api,
-        network: this.network,
-      })
-      nftUtxo = nftRes.nftUtxo
-    }
-
-    // 1.2 验证nft Utxo
+    // 第一步：验证nft Utxo（由外部传入并携带 txHex/preTxHex）
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
     // 1.3 确保余额充足（需要构造两个交易）
@@ -1830,7 +1711,14 @@ export class NftManager {
   }
 
   private async pretreatNftUtxo(nftUtxo, codehash: string, genesis: string) {
-    let txHex = await this.api.getRawTxData(nftUtxo.txId)
+    // ⚠️ 本 SDK 不做链上查询：nftUtxo 必须由外部传入，并自带 txHex / preTxHex（satotxInfo）
+    if (!nftUtxo || !nftUtxo.txHex || !nftUtxo.preTxHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'nftUtxo must be provided by the external layer, including txHex and preTxHex.'
+      )
+    }
+    let txHex = nftUtxo.txHex
     const tx = new mvc.Transaction(txHex)
     let tokenScript = tx.outputs[nftUtxo.outputIndex].script
 
@@ -1864,7 +1752,7 @@ export class NftManager {
     if (!input) throw new CodeError(ErrCode.EC_INNER_ERROR, 'invalid nftUtxo')
     let preTxId = input.prevTxId.toString('hex')
     let preOutputIndex = input.outputIndex
-    let preTxHex = await this.api.getRawTxData(preTxId)
+    let preTxHex = nftUtxo.preTxHex
     const preTx = new mvc.Transaction(preTxHex)
 
     nftUtxo.satotxInfo = {
@@ -1921,21 +1809,8 @@ export class NftManager {
     // prevouts
     let prevouts = new Prevouts()
 
-    if (!nftUtxo) {
-      // 第一步：找回nft Utxo并验证，放入第一个输入
-      // 1.1 找回nft Utxo
-      const nftRes = await getNftInfo({
-        tokenIndex,
-        codehash,
-        genesis,
-        api: this.api,
-        network: this.network,
-      })
-      nftUtxo = nftRes.nftUtxo
-
-      // 1.2 验证nft Utxo
-      nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
-    }
+    // ⚠️ nftUtxo 由外部传入并携带 txHex/preTxHex，此处仅校验并解析 satotxInfo
+    nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
     // 1.3 确保余额充足
     const genesisScript = new Bytes(nftUtxo.preLockingScript.toHex())
@@ -1960,7 +1835,7 @@ export class NftManager {
       txComposer,
       nftInput,
       nftAddress,
-      CONTRACT_TYPE.BCP01_NFT_GENESIS
+      CONTRACT_TYPE.MCP01_NFT_GENESIS
     )
 
     // 1.5 prevouts添加nft utxo
@@ -2036,6 +1911,7 @@ export class NftManager {
     utxos,
     utxoPrivateKeys,
     sensibleId,
+    genesisUtxo,
     metaTxId,
     metaOutputIndex,
     opreturnData,
@@ -2047,6 +1923,7 @@ export class NftManager {
     utxos: Utxo[]
     utxoPrivateKeys: mvc.PrivateKey[]
     sensibleId: string
+    genesisUtxo: any
     metaTxId: string
     metaOutputIndex: number
     opreturnData: string
@@ -2059,25 +1936,16 @@ export class NftManager {
     // 输入：第一个为上一个创世，后面是付钱的utxo
     // 输出：第一个为更新的创世，第二个是nft，后面是找零
 
-    // 第一步：找回创世utxo，放入第一个输入
-    // 1.1 找回创世utxo
-    const { genesisContract, genesisUtxo, genesisTxId, genesisOutputIndex } =
-      (await getLatestGenesisInfo({
-        sensibleId,
-        api: this.api,
-        address: this.purse.address,
-        type: 'nft',
-      })) as {
-        genesisContract: NftGenesis
-        genesisUtxo: Utxo
-        genesisTxId: string
-        genesisOutputIndex: number
-      }
+    // 第一步：准备创世utxo（由外部传入并携带 txHex/preTxHex）
+    const { genesisTxId, genesisOutputIndex, genesisUtxo: preparedGenesisUtxo } =
+      buildGenesisInfoFromUtxo({ genesisUtxo })
+    const genesisContract = NftGenesisFactory.createContract()
+    genesisContract.setFormatedDataPartFromLockingScript(preparedGenesisUtxo.lockingScript)
 
     // 1.2 确保余额充足
     let balance = utxos.reduce((pre, cur) => pre + cur.satoshis, 0)
     let estimateSatoshis = await this._calIssueEstimateFee({
-      genesisUtxoSatoshis: genesisUtxo.satoshis,
+      genesisUtxoSatoshis: preparedGenesisUtxo.satoshis,
       opreturnData,
       utxoMaxCount: utxos.length,
     })
@@ -2102,9 +1970,9 @@ export class NftManager {
     const genesisAddress = this.purse.address.toString() // TODO: 他人创世
     const genesisInputIndex = addContractInput(
       txComposer,
-      genesisUtxo,
+      preparedGenesisUtxo,
       genesisAddress,
-      CONTRACT_TYPE.BCP01_NFT_GENESIS
+      CONTRACT_TYPE.MCP01_NFT_GENESIS
     )
 
     // 第二步：添加付钱输入
@@ -2157,7 +2025,7 @@ export class NftManager {
     // 第六步：添加找零输出，解锁创世合约输入
     await this.unlockGenesisAndChange(
       txComposer,
-      genesisUtxo,
+      preparedGenesisUtxo,
       genesisContract,
       genesisInputIndex,
       nextGenesisOutputIndex,
@@ -2664,6 +2532,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
 
     sellerWif,
     sellUtxo,
@@ -2674,8 +2543,9 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     sellerWif: string
-    sellUtxo?: SellUtxo
+    sellUtxo: SellUtxo
     opreturnData?: any
 
     utxoMaxCount?: number
@@ -2687,28 +2557,17 @@ export class NftManager {
     const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
     const sellerPublicKey = sellerPrivateKey.publicKey
 
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
+    // ⚠️ nftUtxo 由外部传入并携带 txHex/preTxHex（satotxInfo）
+    nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
-    // 第二步：找到并重建销售utxo
-    // 2.1 查找销售utxo
-    if (!sellUtxo) {
-      sellUtxo = await this.api.getNftSellUtxo(codehash, genesis, tokenIndex)
-    }
-    if (!sellUtxo) {
+    // 第二步：重建销售utxo（sellUtxo 由外部传入并携带 txHex）
+    if (!sellUtxo.txHex) {
       throw new CodeError(
-        ErrCode.EC_NFT_NOT_ON_SELL,
-        'The NFT is not for sale because the corresponding SellUtxo cannot be found.'
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo.txHex must be provided by the external layer.'
       )
     }
-
-    let nftSellTxHex = await this.api.getRawTxData(sellUtxo.txId)
-    let nftSellTx = new mvc.Transaction(nftSellTxHex)
+    let nftSellTx = new mvc.Transaction(sellUtxo.txHex)
     let nftSellUtxo = {
       txId: sellUtxo.txId,
       outputIndex: sellUtxo.outputIndex,
@@ -2733,6 +2592,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
 
     buyerWif,
     sellUtxo,
@@ -2743,8 +2603,9 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     buyerWif: string
-    sellUtxo?: SellUtxo
+    sellUtxo: SellUtxo
     opreturnData?: any
 
     utxoMaxCount?: number
@@ -2752,22 +2613,22 @@ export class NftManager {
     // checkParamGenesis(genesis)
     // checkParamCodehash(codehash)
 
-    // 第二步：找到并重建销售utxo
-    // 2.1 查找销售utxo
-    if (!sellUtxo) {
-      sellUtxo = await this.api.getNftSellUtxo(codehash, genesis, tokenIndex)
-    }
     if (!sellUtxo) {
       throw new CodeError(
-        ErrCode.EC_NFT_NOT_ON_SELL,
-        'The NFT is not for sale because the corresponding SellUtxo cannot be found.'
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo must be provided by the external layer.'
       )
     }
 
     return Math.ceil(sellUtxo.price * 1.06) + 25000 // TODO
 
-    let nftSellTxHex = await this.api.getRawTxData(sellUtxo.txId)
-    let nftSellTx = new mvc.Transaction(nftSellTxHex)
+    if (!sellUtxo.txHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'sellUtxo.txHex must be provided by the external layer.'
+      )
+    }
+    let nftSellTx = new mvc.Transaction(sellUtxo.txHex)
     let nftSellUtxo = {
       txId: sellUtxo.txId,
       outputIndex: sellUtxo.outputIndex,
@@ -2777,15 +2638,7 @@ export class NftManager {
 
     const buyerPrivateKey = new mvc.PrivateKey(buyerWif)
     const buyerPublicKey = buyerPrivateKey.publicKey
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
-
-    // 1.2 验证nft Utxo
+    // ⚠️ nftUtxo 由外部传入并携带 txHex/preTxHex（satotxInfo）
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
     let genesisScript = nftUtxo.preNftAddress.hashBuffer.equals(Buffer.alloc(20, 0))
@@ -2808,6 +2661,7 @@ export class NftManager {
     genesis,
     codehash,
     tokenIndex,
+    nftUtxo,
 
     senderWif,
     opreturnData,
@@ -2816,6 +2670,7 @@ export class NftManager {
     genesis: string
     codehash: string
     tokenIndex: string
+    nftUtxo: any
     senderWif?: string
     senderPrivateKey?: string | mvc.PrivateKey
     senderPublicKey?: string | mvc.PublicKey
@@ -2825,15 +2680,7 @@ export class NftManager {
   }) {
     const senderPrivateKey = new mvc.PrivateKey(senderWif)
     const senderPublicKey = senderPrivateKey.publicKey
-    let { nftUtxo } = await getNftInfo({
-      tokenIndex,
-      codehash,
-      genesis,
-      api: this.api,
-      network: this.network,
-    })
-
-    // 1.2 验证nft Utxo
+    // ⚠️ nftUtxo 由外部传入并携带 txHex/preTxHex（satotxInfo）
     nftUtxo = await this.pretreatNftUtxo(nftUtxo, codehash, genesis)
 
     let genesisScript = nftUtxo.preNftAddress.hashBuffer.equals(Buffer.alloc(20, 0))

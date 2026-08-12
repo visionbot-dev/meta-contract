@@ -516,13 +516,13 @@ Merkle 证明相关的工具函数：
 ```typescript
 enum CONTRACT_TYPE {
   P2PKH,                          // 标准 P2PKH
-  BCP01_NFT,                      // MCP01 NFT
-  BCP01_NFT_GENESIS,              // MCP01 NFT 创世
-  BCP01_NFT_UNLOCK_CONTRACT_CHECK, // MCP01 NFT 解锁检查
-  BCP02_TOKEN,                    // MCP02 代币
-  BCP02_TOKEN_GENESIS,            // MCP02 代币创世
-  BCP02_TOKEN_TRANSFER_CHECK,     // MCP02 转账检查
-  BCP02_TOKEN_UNLOCK_CONTRACT_CHECK, // MCP02 解锁检查
+  MCP01_NFT,                      // MCP01 NFT
+  MCP01_NFT_GENESIS,              // MCP01 NFT 创世
+  MCP01_NFT_UNLOCK_CONTRACT_CHECK, // MCP01 NFT 解锁检查
+  MCP02_TOKEN,                    // MCP02 代币
+  MCP02_TOKEN_GENESIS,            // MCP02 代币创世
+  MCP02_TOKEN_TRANSFER_CHECK,     // MCP02 转账检查
+  MCP02_TOKEN_UNLOCK_CONTRACT_CHECK, // MCP02 解锁检查
   OTHER,                          // 其他
 }
 ```

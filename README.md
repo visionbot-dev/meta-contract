@@ -2,6 +2,10 @@
 
 该 SDK 帮助您与 [MVC 元合约][mvc] 进行交互。
 
+> ⚠️ **轻量化说明（0.6+）**：本 SDK **只负责交易构造**，不再内置任何网络请求
+> （utxo 查询、交易广播、API 客户端已移除）。所有链上数据（SPACE/NFT/FT/创世 utxo 及其
+> 所在交易 hex `txHex`/`preTxHex`）必须由外部业务层查询后传入。
+
 更多文档请访问：<https://meta-contract-doc.vercel.app/>
 
 ## 安装
@@ -15,14 +19,12 @@ npm install meta-contract-x --save
 ### 初始化
 
 ```js
-import { FtManager, API_TARGET } from 'meta-contract-x'
+import { FtManager } from 'meta-contract-x'
 
 const ft = new FtManager({
   network: 'testnet',
-  apiTarget: API_TARGET.MVC,
   purse: '', // MVC 地址的 WIF 私钥，用于支付交易手续费
   feeb: 0.5,
-  apiHost,
 })
 ```
 
@@ -38,6 +40,7 @@ let { txHex, txid, tx, genesis, codehash, sensibleId } = await ft.genesis({
   tokenSymbol: 'CC',
   decimalNum: 3,
   genesisWif: CoffeeShop.wif,
+  utxos, // 必填：SPACE utxo（外部查询后传入）
 })
 ```
 
@@ -49,10 +52,12 @@ let { txHex, txid, tx, genesis, codehash, sensibleId } = await ft.genesis({
 let { txid, txHex, tx } = await ft.mint({
   version: 2,
   sensibleId: sensibleId,
+  genesisUtxo, // 必填：最新创世 utxo（含 txHex/preTxHex，外部查询后传入）
   genesisWif: CoffeeShop.wif,
   receiverAddress: CoffeeShop.address,
   tokenAmount: '1000000000000',
   allowIncreaseMints: false, // 为 true 时可继续增发
+  utxos, // 必填：SPACE utxo
 })
 ```
 
@@ -75,33 +80,23 @@ let { txid } = await ft.transfer({
     },
   ],
   senderWif: CoffeeShop.wif,
-  ftUtxos: ParamFtUtxo[],
+  ftUtxos: ParamFtUtxo[], // 必填：FT utxo（含 txHex/preTxHex，外部查询后传入）
   ftChangeAddress: string | mvc.Address,
 
-  utxos: ParamUtxo[],
+  utxos: ParamUtxo[], // 必填：SPACE utxo
   changeAddress: string | mvc.Address
 
 })
 ```
 
-### 查询余额
-
-查询代币余额
-
-```js
-let { balance, pendingBalance, utxoCount, decimal } = await ft.getBalanceDetail({
-  codehash,
-  genesis,
-  address: Alice.address,
-})
-```
+> 余额查询已不在 SDK 内提供，请由外部业务层负责查询。
 
 ## NFT（非同质化代币）使用
 
 ### 初始化
 
 ```ts
-import { API_NET, API_TARGET, mvc, NftManager } from 'meta-contract-x'
+import { API_NET, mvc, NftManager } from 'meta-contract-x'
 
 // 生成新的种子，请保存助记词
 // let mnemonic = mvc.Mnemonic.fromString('cute siren parrot merit swamp plate federal buddy sing tourist family tragic')
@@ -112,9 +107,7 @@ console.log(hdPrivateKey.publicKey.toAddress('testnet').toString())
 console.log(mnemonic.toHDPrivateKey('', 'testnet').deriveChild("m/44'/0'/0'").privateKey.toString())
 // 使用此私钥签名交易
 const privKey = mnemonic.toHDPrivateKey('', 'testnet').deriveChild("m/44'/0'/0'").privateKey.toString()
-const nftManager = new NftManager({ apiTarget: API_TARGET.MVC, network: API_NET.TEST, purse: privKey })
-// todo 后续将移除 authorize
-nftManager.api.authorize({ authorization: 'METASV_KEY' })
+const nftManager = new NftManager({ network: API_NET.TEST, purse: privKey })
 ```
 
 ### 创建系列（Genesis）
@@ -123,7 +116,7 @@ nftManager.api.authorize({ authorization: 'METASV_KEY' })
 请保存返回的字段（genesis、codehash、sensibleId）
 
 ```ts
-const result = await nftManager.genesis({ totalSupply: '10', version: 2 })
+const result = await nftManager.genesis({ totalSupply: '10', version: 2, utxos })
 console.log(result)
 ```
 
@@ -139,6 +132,8 @@ const mintResult = await nftManager.mint({
   metaTxId: '0000000000000000000000000000000000000000000000000000000000000000',
   sensibleId: result.sensibleID,
   metaOutputIndex: 0,
+  genesisUtxo, // 必填：最新创世 utxo（含 txHex/preTxHex，外部查询后传入）
+  utxos, // 必填：SPACE utxo
 })
 console.log(mintResult)
 ```
@@ -154,6 +149,8 @@ const result = await nftManager.transfer({
   receiverAddress: 'mymqKrpZjY31ABhPXfXjfVcUd78L1LCHEv',
   senderWif: privKey,
   tokenIndex: '1',
+  nftUtxo, // 必填：NFT utxo（含 txHex/preTxHex，外部查询后传入）
+  utxos, // 必填：SPACE utxo
 })
 console.log(result)
 ```
@@ -169,6 +166,8 @@ let { sellTx, tx } = await nftManager.sell({
   tokenIndex: '1',
   sellerWif: Alice.wif,
   price: 2000,
+  nftUtxo, // 必填
+  utxos, // 必填
 })
 ```
 
@@ -181,8 +180,10 @@ let { unlockCheckTx, tx } = await nftManager.cancelSell({
   genesis,
   codehash,
   tokenIndex: '1',
-
   sellerWif: Alice.wif,
+  nftUtxo, // 必填
+  sellUtxo, // 必填：挂单 utxo（含 txHex）
+  utxos, // 必填
 })
 ```
 
@@ -197,6 +198,9 @@ let { unlockCheckTx, tx } = await nftManager.buy({
   tokenIndex: '1',
   buyerWif: Bob.wif,
   buyerAddress: Bob.Address,
+  nftUtxo, // 必填
+  sellUtxo, // 必填：挂单 utxo（含 txHex）
+  utxos, // 必填
 })
 ```
 
@@ -221,7 +225,7 @@ interface ISigner {
 ### MetaletSigner
 
 ```ts
-import { NftManager, FtManager, MetaletSigner, API_NET, API_TARGET } from 'meta-contract-x'
+import { NftManager, FtManager, MetaletSigner, API_NET } from 'meta-contract-x'
 
 const signer = new MetaletSigner(window.metaidwallet)
 ```
@@ -231,7 +235,6 @@ const signer = new MetaletSigner(window.metaidwallet)
 ```ts
 const nft = new NftManager({
   network: API_NET.MAIN,
-  apiTarget: API_TARGET.APIMVC,
   signer,                // ← 使用 MetaletSigner 替代 purse
   feeb: 0.5,
 })
@@ -258,7 +261,6 @@ const result = await nft.transfer({
 ```ts
 const ft = new FtManager({
   network: API_NET.MAIN,
-  apiTarget: API_TARGET.APIMVC,
   signer,                // ← 使用 MetaletSigner 替代 purse
   feeb: 0.5,
 })

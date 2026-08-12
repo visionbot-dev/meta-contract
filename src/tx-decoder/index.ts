@@ -1,8 +1,6 @@
-// import { SensibleNFT } from '../bcp01'
-// import { SensibleFT } from '../bcp02'
 import * as mvc from '../mvc'
 import * as proto from '../common/protoheader'
-import { API_NET } from '../api'
+import { API_NET } from '../common/types'
 import { NftManager, FtManager } from '..'
 export enum OutputType {
   SENSIBLE_NFT,

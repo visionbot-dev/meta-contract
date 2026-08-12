@@ -16,17 +16,13 @@ export { mvc }
 const BN = mvc.crypto.BN
 export { BN }
 
-export { Net } from './net'
-export { API_NET, API_TARGET, Api } from './api'
+export { API_NET } from './common/types'
 export { OutputType, TxDecoder } from './tx-decoder'
 export { TxComposer } from './tx-composer'
-export { Wallet } from './wallet'
 
 import { NftManager } from './mcp01'
 import { FtManager } from './mcp02'
-const SensibleNFT = NftManager
-const SensibleFT = FtManager
-export { SensibleNFT, SensibleFT, NftManager, FtManager }
+export { NftManager, FtManager }
 
 export { ISigner, LocalSigner, MetaletSigner, signOneInput } from './signer'
 export { MetaletLike, MetaletSignTxParams, MetaletSignTxResult, SignOneResult } from './signer'

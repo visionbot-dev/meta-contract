@@ -12,4 +12,7 @@ tests/acceptance/mcp02/cc.test.ts
 tests/acceptance/mcp02/convert.test.ts
 tests/acceptance/mcp02/mit.test.ts
 
+# 打包产物
+*.tgz
+
 # renewpackage-lock.json

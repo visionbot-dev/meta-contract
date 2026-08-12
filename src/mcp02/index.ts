@@ -11,7 +11,7 @@ import {
 } from '../scryptlib'
 import { CodeError, ErrCode } from '../common/error'
 import * as mvc from '../mvc'
-import { Api, API_NET, API_TARGET } from '..'
+import { API_NET } from '..'
 import { ISigner, LocalSigner } from '../signer'
 
 import { BURN_ADDRESS, FEEB } from './constants'
@@ -35,13 +35,13 @@ import { TOKEN_TRANSFER_TYPE, TokenTransferCheckFactory } from './contract-facto
 import * as ftProto from './contract-proto/token.proto'
 import { DustCalculator } from '../common/DustCalculator'
 import { SizeTransaction } from '../common/SizeTransaction'
-import { FungibleTokenUnspent } from '../api'
 import {
   addChangeOutput,
   addContractInput,
   addContractOutput,
   addOpreturnOutput,
   addP2PKHInputs,
+  buildGenesisInfoFromUtxo,
   checkFeeRate,
   prepareUtxos,
   unlockP2PKHInputs,
@@ -158,8 +158,6 @@ type Purse = {
 
 type Mcp02Options = {
   network?: API_NET
-  apiTarget?: API_TARGET
-  apiHost?: string
   purse?: string
   signer?: ISigner
   feeb?: number
@@ -190,6 +188,11 @@ type FtUtxo = {
   tokenAddress?: mvc.Address
   tokenAmount?: BN
 
+  /** FT utxo 所在交易原始 hex（由外部业务层传入，用于构建解锁证明） */
+  txHex?: string
+  /** FT utxo 前序交易原始 hex（由外部业务层传入，用于构建解锁证明） */
+  preTxHex?: string
+
   satotxInfo?: {
     txId?: string
     tx?: any
@@ -216,7 +219,6 @@ type FtUtxo = {
 
 export class FtManager {
   private network: API_NET
-  private _api: Api
   private zeroAddress: mvc.Address
   private purse: Purse
   private feeb: number
@@ -226,28 +228,16 @@ export class FtManager {
   private debug: boolean
   private signer?: ISigner
 
-  get api() {
-    return this._api
-  }
-
-  get sensibleApi() {
-    return this._api
-  }
-
   constructor({
     network = API_NET.MAIN,
-    apiTarget = API_TARGET.CYBER3,
     purse,
     signer,
     feeb = FEEB,
-    apiHost,
     dustLimitFactor = 300,
     dustAmount,
     debug = false,
   }: Mcp02Options) {
-    // 初始化API
     this.network = network
-    this._api = new Api(network, apiTarget, apiHost)
 
     if (signer) {
       this.signer = signer
@@ -278,11 +268,10 @@ export class FtManager {
    * @param tokenName token name, limited to 20 bytes
    * @param tokenSymbol the token symbol, limited to 10 bytes
    * @param decimalNum the decimal number, range 0-255
-   * @param utxos (Optional) specify mvc utxos
+   * @param utxos (Required) specify mvc utxos, provided by the external layer
    * @param changeAddress (Optional) specify mvc changeAddress
    * @param opreturnData (Optional) append an opReturn output
    * @param genesisWif the private key of the token genesiser
-   * @param noBroadcast (Optional) whether not to broadcast the transaction, the default is false
    * @returns
    */
   public async genesis({
@@ -294,7 +283,6 @@ export class FtManager {
     changeAddress,
     opreturnData,
     genesisWif,
-    noBroadcast = false,
   }: {
     version?: number
     tokenName: string
@@ -304,7 +292,6 @@ export class FtManager {
     changeAddress?: string | mvc.Address
     opreturnData?: any
     genesisWif?: string
-    noBroadcast?: boolean
   }) {
     // validate params
     $.checkArgument(
@@ -327,7 +314,7 @@ export class FtManager {
       'version should be a number and must be between 1 and 2'
     )
 
-    const utxoInfo = await prepareUtxos(this.purse, this.api, this.network, utxosInput)
+    const utxoInfo = prepareUtxos(utxosInput)
     if (changeAddress) {
       changeAddress = new mvc.Address(changeAddress, this.network)
     } else {
@@ -350,9 +337,6 @@ export class FtManager {
     })
 
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(txHex)
-    }
 
     let { codehash, genesis, sensibleId } = getGenesisIdentifiers({
       version,
@@ -377,6 +361,7 @@ export class FtManager {
     genesis: string
     codehash: string
     sensibleId: string
+    genesisUtxo: any
     genesisWif: string
     receiverAddress: string | mvc.Address
     tokenAmount: string | BN
@@ -384,7 +369,6 @@ export class FtManager {
     utxos?: ParamUtxo[]
     changeAddress?: string | mvc.Address
     opreturnData?: any
-    noBroadcast?: boolean
   }) {
     return this.mint(options)
   }
@@ -392,6 +376,7 @@ export class FtManager {
   public async mint({
     version = 2,
     sensibleId,
+    genesisUtxo,
     genesisWif,
     receiverAddress,
     tokenAmount,
@@ -399,10 +384,10 @@ export class FtManager {
     utxos,
     changeAddress,
     opreturnData,
-    noBroadcast = false,
   }: {
     version?: number
     sensibleId: string
+    genesisUtxo: any
     genesisWif: string
     receiverAddress: string | mvc.Address
     tokenAmount: string | BN
@@ -410,14 +395,14 @@ export class FtManager {
     utxos?: ParamUtxo[]
     changeAddress?: string | mvc.Address
     opreturnData?: any
-    noBroadcast?: boolean
   }) {
     $.checkArgument(sensibleId, 'sensibleId is required')
+    $.checkArgument(genesisUtxo, 'genesisUtxo is required')
     $.checkArgument(genesisWif, 'genesisWif is required')
     $.checkArgument(receiverAddress, 'receiverAddress is required')
     $.checkArgument(tokenAmount, 'tokenAmount is required')
 
-    const utxoInfo = await this._pretreatUtxos(utxos)
+    const utxoInfo = this._pretreatUtxos(utxos)
     if (changeAddress) {
       changeAddress = new mvc.Address(changeAddress, this.network)
     } else {
@@ -431,6 +416,7 @@ export class FtManager {
     let { txComposer } = await this._mint({
       version,
       sensibleId,
+      genesisUtxo,
       receiverAddress,
       tokenAmount,
       allowIncreaseMints,
@@ -443,9 +429,6 @@ export class FtManager {
     })
 
     let txHex = txComposer.getRawHex()
-    if (!noBroadcast) {
-      await this.api.broadcast(txHex)
-    }
 
     return { txHex, txid: txComposer.getTxId(), tx: txComposer.getTx() }
   }
@@ -453,6 +436,7 @@ export class FtManager {
   private async _mint({
     version,
     sensibleId,
+    genesisUtxo,
     receiverAddress,
     tokenAmount,
     allowIncreaseMints = true,
@@ -465,6 +449,7 @@ export class FtManager {
   }: {
     version: number
     sensibleId: string
+    genesisUtxo: any
     receiverAddress: mvc.Address
     tokenAmount: BN
     allowIncreaseMints: boolean
@@ -472,19 +457,18 @@ export class FtManager {
     utxoPrivateKeys?: mvc.PrivateKey[]
     changeAddress?: mvc.Address
     opreturnData?: any
-    noBroadcast?: boolean
     genesisPrivateKey?: mvc.PrivateKey
     genesisPublicKey: mvc.PublicKey
   }) {
     const genesisAddress = genesisPrivateKey.toAddress(this.network).toString()
-    let { genesisContract, genesisTxId, genesisOutputIndex, genesisUtxo } = await this._prepareMintUtxo({
-      sensibleId,
-      genesisAddress,
-    })
+    // ⚠️ 本 SDK 不做链上查询：genesisUtxo 必须由外部传入（最新创世 utxo，携带 txHex/preTxHex）
+    let { genesisContract, genesisTxId, genesisOutputIndex, genesisUtxo: preparedGenesisUtxo } =
+      this._prepareMintUtxo({ genesisUtxo })
+    genesisUtxo = preparedGenesisUtxo
 
     let balance = utxos.reduce((pre, cur) => pre + cur.satoshis, 0)
     let estimateSatoshis = await this._calMintEstimateFee({
-      genesisUtxoSatoshis: genesisUtxo.satoshis,
+      genesisUtxoSatoshis: preparedGenesisUtxo.satoshis,
       opreturnData,
       allowIncreaseMints,
       utxoMaxCount: utxos.length,
@@ -523,7 +507,7 @@ export class FtManager {
       txComposer,
       genesisUtxo as any,
       genesisPublicKey.toAddress(this.network).toString(),
-      CONTRACT_TYPE.BCP02_TOKEN_GENESIS
+      CONTRACT_TYPE.MCP02_TOKEN_GENESIS
     )
 
     const p2pkhInputIndexs = addP2PKHInputs(txComposer, utxos)
@@ -558,11 +542,17 @@ export class FtManager {
     const genesisTxHeader = inputRes[1] as Bytes // TODO:
 
     // Find a valid preGenesisTx
-
     const genesisTxInput = genesisTx.inputs[prevInputIndex]
     const preGenesisOutputIndex = genesisTxInput.outputIndex
     const preGenesisTxId = genesisTxInput.prevTxId.toString('hex')
-    const preGenesisTxHex = await this.api.getRawTxData(preGenesisTxId)
+    // ⚠️ 本 SDK 不做链上查询：preTxHex 由外部随 genesisUtxo 传入
+    const preGenesisTxHex = genesisUtxo.preTxHex
+    if (!preGenesisTxHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'genesisUtxo.preTxHex must be provided by the external layer.'
+      )
+    }
     const preGenesisTx = new mvc.Transaction(preGenesisTxHex)
 
     const prevOutputProof = TokenUtil.getTxOutputProof(preGenesisTx, preGenesisOutputIndex)
@@ -637,98 +627,28 @@ export class FtManager {
     return { txComposer }
   }
 
-  private async _prepareMintUtxo({
-    sensibleId,
-    genesisAddress,
-  }: {
-    sensibleId: string
-    genesisAddress: string
-  }) {
+  private _prepareMintUtxo({ genesisUtxo }: { genesisUtxo: any }) {
     let genesisContract = TokenGenesisFactory.createContract()
 
-    //Looking for UTXO for issue
-    let { genesisTxId, genesisOutputIndex } = parseSensibleID(sensibleId)
-    let genesisUtxo = await this._getMintUtxo(
-      genesisContract.getCodeHash(),
-      genesisTxId,
-      genesisOutputIndex,
-      genesisAddress
-    )
-    if (!genesisUtxo) {
-      throw new CodeError(ErrCode.EC_FIXED_TOKEN_SUPPLY, 'token supply is fixed')
+    // ⚠️ 本 SDK 不做链上查询：genesisUtxo 必须由外部传入（最新创世 utxo，携带 txHex/preTxHex）
+    if (!genesisUtxo || !genesisUtxo.txHex || !genesisUtxo.preTxHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'genesisUtxo must be provided by the external layer, including txHex and preTxHex.'
+      )
     }
 
-    let txHex = await this.api.getRawTxData(genesisUtxo.txId)
-    const tx = new mvc.Transaction(txHex)
-    let preTxId = tx.inputs[0].prevTxId.toString('hex')
-    let preOutputIndex = tx.inputs[0].outputIndex
-    let preTxHex = await this.api.getRawTxData(preTxId)
-    genesisUtxo.satotxInfo = {
-      txId: genesisUtxo.txId,
-      outputIndex: genesisUtxo.outputIndex,
-      txHex,
-      preTxId,
-      preOutputIndex,
-      preTxHex,
-      tx,
-    }
+    const { genesisTxId, genesisOutputIndex, genesisUtxo: preparedGenesisUtxo } =
+      buildGenesisInfoFromUtxo({ genesisUtxo })
 
-    let output = tx.outputs[genesisUtxo.outputIndex]
-    genesisUtxo.satoshis = output.satoshis
-    genesisUtxo.lockingScript = output.script
-    genesisContract.setFormatedDataPartFromLockingScript(genesisUtxo.lockingScript)
+    let output = preparedGenesisUtxo.lockingScript
+    genesisContract.setFormatedDataPartFromLockingScript(output)
 
     return {
       genesisContract,
       genesisTxId,
       genesisOutputIndex,
-      genesisUtxo,
-    }
-  }
-
-  private async _getMintUtxo(
-    codehash: string,
-    genesisTxId: string,
-    genesisOutputIndex: number,
-    genesisAddress: string
-  ): Promise<FtUtxo> {
-    let unspent: FungibleTokenUnspent
-    let firstGenesisTxHex = await this.api.getRawTxData(genesisTxId)
-    let firstGenesisTx = new mvc.Transaction(firstGenesisTxHex)
-
-    let scriptBuffer = firstGenesisTx.outputs[genesisOutputIndex].script.toBuffer()
-    let originGenesis = ftProto.getQueryGenesis(scriptBuffer)
-    let genesisUtxos = await this.api.getFungibleTokenUnspents(codehash, originGenesis, genesisAddress)
-
-    unspent = genesisUtxos.find((v) => v.txId == genesisTxId && v.outputIndex == genesisOutputIndex)
-
-    if (!unspent) {
-      let _dataPartObj = ftProto.parseDataPart(scriptBuffer)
-      _dataPartObj.sensibleID = {
-        txid: genesisTxId,
-        index: genesisOutputIndex,
-      }
-      let newScriptBuf = ftProto.updateScript(scriptBuffer, _dataPartObj)
-
-      let issueGenesis = ftProto.getQueryGenesis(newScriptBuf)
-      let issueUtxos = await this.api.getFungibleTokenUnspents(codehash, issueGenesis, genesisAddress)
-      if (issueUtxos.length > 0) {
-        unspent = issueUtxos[0]
-      }
-    }
-
-    if (unspent) {
-      return {
-        txId: unspent.txId,
-        outputIndex: unspent.outputIndex,
-      }
-    }
-    // ⚠️ 兜底：origin/issue 索引都未找到最新创世 utxo（mvcapi 索引延迟/未收录）时，
-    //    直接使用创世交易自身的创世输出，避免误判 token supply is fixed
-    //    （与 getLatestGenesisUtxo 的 2279be7 兜底一致；解锁依赖后续 raw tx 解析，创世输出始终存在）
-    return {
-      txId: genesisTxId,
-      outputIndex: genesisOutputIndex,
+      genesisUtxo: preparedGenesisUtxo,
     }
   }
 
@@ -770,7 +690,6 @@ export class FtManager {
     ownerWif,
     utxos,
     changeAddress,
-    noBroadcast = false,
     opreturnData,
   }: {
     codehash: string
@@ -778,7 +697,6 @@ export class FtManager {
     ownerWif?: string
     utxos?: ParamUtxo[]
     changeAddress?: string | mvc.Address
-    noBroadcast?: boolean
     opreturnData?: any
   }) {
     $.checkArgument(ownerWif, 'ownerWif is required')
@@ -789,92 +707,31 @@ export class FtManager {
       utxos,
       changeAddress,
       isMerge: true,
-      noBroadcast,
       receivers: [],
       opreturnData,
     })
   }
 
-  public async totalMerge({
-    codehash,
-    genesis,
-    ownerWif,
-    changeAddress,
-    opreturnData,
-  }: {
-    codehash: string
-    genesis: string
-    ownerWif?: string
-    changeAddress?: string | mvc.Address
-    opreturnData?: any
-  }) {
-    $.checkArgument(ownerWif, 'ownerWif is required')
-    const ownerPublicKey = mvc.PrivateKey.fromWIF(ownerWif).toPublicKey()
-
-    const txids: string[] = []
-    while (true) {
-      const ftUtxos = await this.api.getFungibleTokenUnspents(
-        codehash,
-        genesis,
-        ownerPublicKey.toAddress(this.network).toString(),
-        20
-      )
-
-      if (ftUtxos.length <= 1) {
-        break
-      }
-
-      const paramFtUtxos = ftUtxos.map((v) => {
-        return {
-          txId: v.txId,
-          outputIndex: v.outputIndex,
-          tokenAddress: v.tokenAddress,
-          tokenAmount: v.tokenAmount,
-          wif: ownerWif,
-        }
-      })
-
-      const { txid } = await this.transfer({
-        codehash,
-        genesis,
-        senderWif: ownerWif,
-        ftUtxos: paramFtUtxos,
-        changeAddress,
-        isMerge: true,
-        receivers: [],
-        opreturnData,
-      })
-      txids.push(txid)
-
-      // sleep 1s
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-    }
-
-    return { txids }
-  }
-
-  private async _pretreatUtxos(
+  private _pretreatUtxos(
     paramUtxos?: ParamUtxo[]
-  ): Promise<{ utxos: Utxo[]; utxoPrivateKeys: mvc.PrivateKey[] }> {
+  ): { utxos: Utxo[]; utxoPrivateKeys: mvc.PrivateKey[] } {
     let utxoPrivateKeys = []
     let utxos: Utxo[] = []
 
-    //If utxos are not provided, use purse to fetch utxos
-    if (!paramUtxos) {
-      if (!this.purse) throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'Utxos or Purse must be provided.')
-      paramUtxos = await this.api.getUnspents(this.purse.address.toString())
-      paramUtxos.forEach((v) => {
-        utxoPrivateKeys.push(this.purse.privateKey)
-      })
-    } else {
-      paramUtxos.forEach((v) => {
-        if (v.wif) {
-          let privateKey = new mvc.PrivateKey(v.wif)
-          utxoPrivateKeys.push(privateKey)
-          v.address = privateKey.toAddress(this.network).toString() //Compatible with the old version, only wif is provided but no address is provided
-        }
-      })
+    // ⚠️ 本 SDK 不做链上查询：utxos 必须由外部业务层传入
+    if (!paramUtxos || !paramUtxos.length) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'utxos must be provided by the external layer.'
+      )
     }
+    paramUtxos.forEach((v) => {
+      if (v.wif) {
+        let privateKey = new mvc.PrivateKey(v.wif)
+        utxoPrivateKeys.push(privateKey)
+        v.address = privateKey.toAddress(this.network).toString() //Compatible with the old version, only wif is provided but no address is provided
+      }
+    })
     paramUtxos.forEach((v) => {
       utxos.push({
         txId: v.txId,
@@ -995,7 +852,6 @@ export class FtManager {
     minUtxoSet = true,
     isMerge,
     opreturnData,
-    noBroadcast = false,
   }: {
     codehash: string
     genesis: string
@@ -1014,7 +870,6 @@ export class FtManager {
     minUtxoSet?: boolean
     isMerge?: boolean
     opreturnData?: any
-    noBroadcast?: boolean
   }): Promise<{
     tx: mvc.Transaction
     txHex: string
@@ -1037,7 +892,7 @@ export class FtManager {
       // Metalet mode: public key obtained from signer
     }
 
-    let utxoInfo = await this._pretreatUtxos(utxos)
+    let utxoInfo = this._pretreatUtxos(utxos)
     if (changeAddress) {
       changeAddress = new mvc.Address(changeAddress, this.network)
     } else {
@@ -1085,11 +940,6 @@ export class FtManager {
     let routeCheckTxHex = transferCheckTxComposer.getRawHex()
     let txHex = txComposer.getRawHex()
 
-    if (!noBroadcast) {
-      await this.api.broadcast(routeCheckTxHex)
-      await this.api.broadcast(txHex)
-    }
-
     return {
       tx: txComposer.getTx(),
       txHex,
@@ -1108,7 +958,6 @@ export class FtManager {
    * @param utxoPrivateKey fee provider utxo private key
    * @param changeAddress satoshi change address
    * @param opreturnData opreturn data
-   * @param noBroadcast if true, will not broadcast tx
    */
   public async burn({
     codehash,
@@ -1119,7 +968,6 @@ export class FtManager {
     changeAddress,
 
     opreturnData,
-    noBroadcast = false,
   }: {
     codehash: string
     genesis: string
@@ -1131,7 +979,6 @@ export class FtManager {
     changeAddress?: string | mvc.Address
 
     opreturnData?: any
-    noBroadcast?: boolean
   }): Promise<{
     tx: mvc.Transaction
     txHex: string
@@ -1144,7 +991,7 @@ export class FtManager {
 
     const version = determineCodehashVersion(codehash)
 
-    let utxoInfo = await this._pretreatUtxos(utxos)
+    let utxoInfo = this._pretreatUtxos(utxos)
     if (changeAddress) {
       changeAddress = new mvc.Address(changeAddress, this.network)
     } else {
@@ -1164,11 +1011,6 @@ export class FtManager {
     })
     let routeCheckTxHex = unlockCheckTxComposer.getRawHex()
     let txHex = txComposer.getRawHex()
-
-    if (!noBroadcast) {
-      await this.api.broadcast(routeCheckTxHex)
-      await this.api.broadcast(txHex)
-    }
 
     return {
       tx: txComposer.getTx(),
@@ -1190,38 +1032,20 @@ export class FtManager {
     let ftUtxoPrivateKeys = []
 
     let publicKeys = []
-    if (!paramFtUtxos) {
-      if (senderPrivateKey) {
-        senderPublicKey = senderPrivateKey.toPublicKey()
-      }
-      if (!senderPublicKey)
-        throw new CodeError(
-          ErrCode.EC_INVALID_ARGUMENT,
-          'ftUtxos or senderPublicKey or senderPrivateKey must be provided.'
-        )
-
-      paramFtUtxos = await this.api.getFungibleTokenUnspents(
-        codehash,
-        genesis,
-        senderPublicKey.toAddress(this.network).toString(),
-        20
+    // ⚠️ 本 SDK 不做链上查询：ftUtxos 必须由外部业务层传入
+    if (!paramFtUtxos || !paramFtUtxos.length) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'ftUtxos must be provided by the external layer.'
       )
-
-      paramFtUtxos.forEach((v) => {
-        if (senderPrivateKey) {
-          ftUtxoPrivateKeys.push(senderPrivateKey)
-        }
-        publicKeys.push(senderPublicKey)
-      })
-    } else {
-      paramFtUtxos.forEach((v) => {
-        if (v.wif) {
-          let privateKey = new mvc.PrivateKey(v.wif)
-          ftUtxoPrivateKeys.push(privateKey)
-          publicKeys.push(privateKey.toPublicKey())
-        }
-      })
     }
+    paramFtUtxos.forEach((v) => {
+      if (v.wif) {
+        let privateKey = new mvc.PrivateKey(v.wif)
+        ftUtxoPrivateKeys.push(privateKey)
+        publicKeys.push(privateKey.toPublicKey())
+      }
+    })
 
     paramFtUtxos.forEach((v, index) => {
       ftUtxos.push({
@@ -1385,24 +1209,24 @@ export class FtManager {
    * @private
    */
   private async perfectFtUtxosInfo(ftUtxos: FtUtxo[], genesis: string): Promise<FtUtxo[]> {
-    //Cache txHex to prevent redundant queries
-    let cachedHexs: {
-      [txid: string]: { waitingRes?: Promise<string>; hex?: string }
+    // ⚠️ 本 SDK 不做链上查询：每个 ftUtxo 必须由外部传入并自带 txHex / preTxHex
+    const cachedHexs: {
+      [txid: string]: { hex?: string }
     } = {}
 
-    //Get txHex
+    //Get txHex（外部传入）
     for (let i = 0; i < ftUtxos.length; i++) {
       let ftUtxo = ftUtxos[i]
+      if (!ftUtxo.txHex) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'ftUtxo.txHex must be provided by the external layer.'
+        )
+      }
       if (!cachedHexs[ftUtxo.txId]) {
         cachedHexs[ftUtxo.txId] = {
-          waitingRes: this.api.getRawTxData(ftUtxo.txId), //async request
+          hex: ftUtxo.txHex,
         }
-      }
-    }
-    for (let id in cachedHexs) {
-      //Wait for all async requests to complete
-      if (cachedHexs[id].waitingRes && !cachedHexs[id].hex) {
-        cachedHexs[id].hex = await cachedHexs[id].waitingRes
       }
     }
     ftUtxos.forEach((v) => {
@@ -1460,16 +1284,17 @@ export class FtManager {
       ftUtxo.prevTokenOutputIndex = input.outputIndex
       ftUtxo.prevTokenInputIndex = prevTokenInputIndex
 
+      // ⚠️ preTxHex 由外部随 ftUtxo 传入
+      if (!ftUtxo.preTxHex) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'ftUtxo.preTxHex must be provided by the external layer.'
+        )
+      }
       if (!cachedHexs[preTxId]) {
         cachedHexs[preTxId] = {
-          waitingRes: this.api.getRawTxData(preTxId),
+          hex: ftUtxo.preTxHex,
         }
-      }
-    }
-    for (let id in cachedHexs) {
-      //Wait for all async requests to complete
-      if (cachedHexs[id].waitingRes && !cachedHexs[id].hex) {
-        cachedHexs[id].hex = await cachedHexs[id].waitingRes
       }
     }
     ftUtxos.forEach((v) => {
@@ -1700,7 +1525,7 @@ export class FtManager {
         inputIndex,
         address: ftUtxo.tokenAddress.toString(),
         sighashType,
-        contractType: CONTRACT_TYPE.BCP02_TOKEN,
+        contractType: CONTRACT_TYPE.MCP02_TOKEN,
       })
       inputTokenScript = ftUtxo.lockingScript
       inputTokenAddressArray = Buffer.concat([inputTokenAddressArray, ftUtxo.tokenAddress.hashBuffer])
@@ -2146,7 +1971,7 @@ export class FtManager {
         inputIndex,
         address: ftUtxo.tokenAddress.toString(),
         sighashType,
-        contractType: CONTRACT_TYPE.BCP02_TOKEN,
+        contractType: CONTRACT_TYPE.MCP02_TOKEN,
       })
       inputTokenScript = ftUtxo.lockingScript
       inputTokenAddressArray = Buffer.concat([inputTokenAddressArray, ftUtxo.tokenAddress.hashBuffer])
@@ -2495,61 +2320,6 @@ export class FtManager {
 
   private getDustThreshold(size: number) {
     return this.dustCalculator.getDustThreshold(size)
-  }
-
-  public async getBalance({
-    codehash,
-    genesis,
-    address,
-  }: {
-    codehash: string
-    genesis: string
-    address: string
-  }): Promise<string> {
-    let { balance, pendingBalance } = await this.api.getFungibleTokenBalance(codehash, genesis, address)
-    return BN.fromString(balance, 10).add(BN.fromString(pendingBalance, 10)).toString()
-  }
-
-  /**
-   * Query token balance detail
-   * @param codehash
-   * @param genesis
-   * @param address
-   * @returns
-   */
-  public async getBalanceDetail({
-    codehash,
-    genesis,
-    address,
-  }: {
-    codehash: string
-    genesis: string
-    address: string
-  }): Promise<{
-    balance: string
-    pendingBalance: string
-    utxoCount: number
-    decimal: number
-  }> {
-    return await this.api.getFungibleTokenBalance(codehash, genesis, address)
-  }
-
-  /**
-   * Query the Token list under this address. Get the balance of each token
-   * @param address
-   * @returns
-   */
-  public async getSummary(address: string) {
-    return await this.api.getFungibleTokenSummary(address)
-  }
-
-  public async getFtUtxos(
-    codehash: string,
-    genesis: string,
-    address: string,
-    count: number = 20
-  ): Promise<FungibleTokenUnspent[]> {
-    return await this.api.getFungibleTokenUnspents(codehash, genesis, address, count)
   }
 
   public async getMergeEstimateFee({

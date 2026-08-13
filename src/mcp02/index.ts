@@ -177,6 +177,10 @@ type ParamFtUtxo = {
   tokenAddress: string
   tokenAmount: string
   wif?: string
+  /** FT utxo 所在交易原始 hex（perfectFtUtxosInfo 硬性要求） */
+  txHex?: string
+  /** FT utxo 前序交易原始 hex */
+  preTxHex?: string
 }
 
 type FtUtxo = {
@@ -480,13 +484,19 @@ export class FtManager {
       )
     }
 
+    // ⚠️ sensibleID 必须用创世脚本数据区存储的部署 sensibleId（FT 创世链全程恒定，链上约定），
+    //    不能直接用 buildGenesisInfoFromUtxo 返回的当前创世 utxo outpoint：
+    //    重构前的 _prepareMintUtxo 返回 parseSensibleID(sensibleId)（部署 outpoint），
+    //    重构后改为当前 utxo outpoint → 非首次 issue 时 tokenScript/newGenesis 输出的
+    //    genesisTxid 与链上创世脚本不一致 → 合约 require(genesisTxid == getGenesisTxid(tokenScript))
+    //    失败 → 广播 OP_EQUALVERIFY。首次 issue（存储为 NULL）时退化为当前创世 outpoint
+    //    （与合约 isFirst 逻辑一致）。
     let newGenesisContract = genesisContract.clone()
-    newGenesisContract.setFormatedDataPart({
-      sensibleID: {
-        txid: genesisTxId,
-        index: genesisOutputIndex,
-      },
-    })
+    const genesisDataPart = genesisContract.getFormatedDataPart()
+    const sensibleID = genesisContract.isFirstGenesis()
+      ? { txid: genesisTxId, index: genesisOutputIndex }
+      : { txid: genesisDataPart.sensibleID.txid, index: genesisDataPart.sensibleID.index }
+    newGenesisContract.setFormatedDataPart({ sensibleID })
 
     let tokenContract = TokenFactory.createContract(
       this.transferCheckCodeHashArray,
@@ -1054,6 +1064,8 @@ export class FtManager {
         tokenAddress: new mvc.Address(v.tokenAddress, this.network),
         tokenAmount: new BN(v.tokenAmount.toString()),
         publicKey: publicKeys[index],
+        txHex: v.txHex,      // ← 补（perfectFtUtxosInfo 检查）
+        preTxHex: v.preTxHex, // ← 补（satotxInfo 构建用）
       })
     })
 

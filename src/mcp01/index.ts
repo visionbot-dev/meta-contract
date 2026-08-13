@@ -1979,10 +1979,17 @@ export class NftManager {
     const p2pkhInputIndexes = addP2PKHInputs(txComposer, utxos)
 
     // 第三步：复制创世合约，添加创世输出
-    const sensibleID = {
-      txid: genesisTxId,
-      index: genesisOutputIndex,
-    }
+    // ⚠️ sensibleID 必须用创世脚本数据区存储的部署 sensibleId（创世链全程恒定，链上约定），
+    //    不能直接用 buildGenesisInfoFromUtxo 返回的当前创世 utxo outpoint：
+    //    重构前的 getLatestGenesisInfo 返回 parseSensibleId(sensibleId)（部署 outpoint），
+    //    重构后改为当前 utxo outpoint → 非首次 mint 时 nftScript/genesis 输出的 sensibleID
+    //    与链上创世脚本不一致 → 合约 require(sensibleID == getGenesisTxid(nftScript)) 失败
+    //    → 广播 OP_EQUALVERIFY。首次 mint（存储为 NULL）时退化为当前创世 outpoint
+    //    （与合约 isFirst 逻辑一致）。
+    const genesisDataPart = genesisContract.getFormatedDataPart()
+    const sensibleID = genesisContract.isFirstGenesis()
+      ? { txid: genesisTxId, index: genesisOutputIndex }
+      : { txid: genesisDataPart.sensibleID.txid, index: genesisDataPart.sensibleID.index }
     // 到头（tokenIndex == totalSupply - 1）时，则不再添加创世输出
     const dataPart = genesisContract.getFormatedDataPart()
     const currentTokenIndex = dataPart.tokenIndex

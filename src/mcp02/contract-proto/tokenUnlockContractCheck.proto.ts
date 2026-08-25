@@ -27,6 +27,17 @@ export function newDataPart(dataPart: FormatedDataPart): Buffer {
     ])
   })
 
+  // ⚠️ 必须按合约解析顺序拼接：inputIndexArray + nSender + receiverTokenAmountArray + receiverArray + nReceivers + tokenCodeHash + tokenID
+  //    之前漏了 receiverTokenAmountArray，导致 nReceivers>0 时（matchSwap/cancelSwapOrder）
+  //    TokenUnlockContractCheck 和 Token.unlock 解析 amountCheck 数据时 OP_SPLIT 越界 -> 广播 -26。
+  let receiverTokenAmountArrayBuf = Buffer.alloc(0)
+  ;(dataPart.receiverTokenAmountArray || []).forEach((tokenAmount) => {
+    receiverTokenAmountArrayBuf = Buffer.concat([
+      receiverTokenAmountArrayBuf,
+      tokenAmount.toBuffer({ endian: 'little', size: 8 }),
+    ])
+  })
+
   let receiverArrayBuf = Buffer.alloc(0)
   dataPart.receiverArray.map((address) => {
     receiverArrayBuf = Buffer.concat([receiverArrayBuf, address.hashBuffer])
@@ -39,6 +50,7 @@ export function newDataPart(dataPart: FormatedDataPart): Buffer {
   const buf = Buffer.concat([
     inputTokenIndexArrayBuf,
     nSenderBuf,
+    receiverTokenAmountArrayBuf,
     receiverArrayBuf,
     nReceiversBuf,
     tokenCodeHashBuf,

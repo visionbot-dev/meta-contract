@@ -2307,17 +2307,7 @@ export class FtManager {
       unlockCheckBInputIndex = txComposer.appendInput(unlockCheckUtxoB)
       prevouts.addVout(unlockCheckUtxoB.txId, unlockCheckUtxoB.outputIndex)
 
-      // 输出 0: FT-A 给买家（对齐 lockA input 0）
-      const buyerAScript = ftProto.getNewTokenScript(
-        tokenALockingScript.toBuffer(),
-        buyerAddress!.hashBuffer,
-        ftA.tokenAmount
-      )
-      txComposer.appendOutput({
-        lockingScript: mvc.Script.fromBuffer(buyerAScript),
-        satoshis: ftA.satoshis,
-      })
-      // 输出 1: FT-B 给卖家（对齐 lockB input 1）
+      // 输出 0: FT-B 给卖家（对齐 FtSwapLock_A input 0，SIGHASH_SINGLE 要求 output[0] 是卖家锁的目标 token）
       const sellerBScript = ftProto.getNewTokenScript(
         ftB.lockingScript.toBuffer(),
         sellerAddress.hashBuffer,
@@ -2326,6 +2316,16 @@ export class FtManager {
       txComposer.appendOutput({
         lockingScript: mvc.Script.fromBuffer(sellerBScript),
         satoshis: ftB.satoshis,
+      })
+      // 输出 1: FT-A 给买家（对齐 FtSwapLock_B input 1，SIGHASH_SINGLE 要求 output[1] 是买家锁的目标 token）
+      const buyerAScript = ftProto.getNewTokenScript(
+        tokenALockingScript.toBuffer(),
+        buyerAddress!.hashBuffer,
+        ftA.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(buyerAScript),
+        satoshis: ftA.satoshis,
       })
     } else {
       lockBInputIndex = -1
@@ -2427,6 +2427,14 @@ export class FtManager {
         contractTxOutputProof: new TxOutputProof(lockAProof),
         operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
       })
+      if (this.debug) {
+        let ret = unlockACall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: ftAInputIndex,
+          inputSatoshis: txComposer.getInput(ftAInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
       txComposer.getInput(ftAInputIndex).setScript(unlockACall.toScript() as mvc.Script)
 
       // 5.2 解锁 FT-B（仅 TRADE）
@@ -2490,6 +2498,14 @@ export class FtManager {
           contractTxOutputProof: new TxOutputProof(lockBProof),
           operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
         })
+        if (this.debug) {
+          let ret = unlockBCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: ftBInputIndex,
+            inputSatoshis: txComposer.getInput(ftBInputIndex).output.satoshis,
+          })
+          if (!ret.success) throw ret
+        }
         txComposer.getInput(ftBInputIndex).setScript(unlockBCall.toScript() as mvc.Script)
       }
 
@@ -2533,7 +2549,16 @@ export class FtManager {
           toHex(signTx(txComposer.getTx(), sellerPrivateKey!, lockAUtxo.lockingScript, lockAUtxo.satoshis, lockAInputIndex, sighashType))
         )
       }
-      txComposer.getInput(lockAInputIndex).setScript(lockAContract.unlock(unlockLockAArgs).toScript() as mvc.Script)
+      const unlockLockACall = lockAContract.unlock(unlockLockAArgs)
+      if (this.debug) {
+        let ret = unlockLockACall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: lockAInputIndex,
+          inputSatoshis: txComposer.getInput(lockAInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
+      txComposer.getInput(lockAInputIndex).setScript(unlockLockACall.toScript() as mvc.Script)
 
       // 5.4 解锁 FtSwapLock_B（仅 TRADE）
       if (op === FT_SWAP_LOCK_OP.TRADE) {
@@ -2569,11 +2594,19 @@ export class FtManager {
           lockedTokenOutputSatoshis: ftB.satoshis,
           op: FT_SWAP_LOCK_OP.TRADE,
         })
+        if (this.debug) {
+          let ret = unlockLockBCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: lockBInputIndex,
+            inputSatoshis: txComposer.getInput(lockBInputIndex).output.satoshis,
+          })
+          if (!ret.success) throw ret
+        }
         txComposer.getInput(lockBInputIndex).setScript(unlockLockBCall.toScript() as mvc.Script)
       }
 
-      // 5.5 解锁 amountCheck A（FT-A）
-      const ftAOutputIndex = 0
+      // 5.5 解锁 amountCheck A（FT-A）：FT-A 输出在 index 1（output 1 = FT-A 给买家）
+      const ftAOutputIndex = 1
       const ftAOutput = txComposer.getTx().outputs[ftAOutputIndex]
       let otherOutputArrayA = Buffer.alloc(0)
       txComposer.getTx().outputs.forEach((output, index) => {
@@ -2598,26 +2631,33 @@ export class FtManager {
           )
         )
       )
-      txComposer.getInput(unlockCheckAInputIndex).setScript(
-        unlockContractA.unlock({
-          txPreimage: unlockCheckPreimageA,
-          prevouts: new Bytes(prevouts.toHex()),
-          tokenScript: new Bytes(tokenALockingScript.toHex()),
-          tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayA.toString('hex')),
-          tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayA.toString('hex')),
-          tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayA.toString('hex')),
-          inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayA)),
-          inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayA)),
-          nOutputs: txComposer.getTx().outputs.length,
-          tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayA.toString('hex')),
-          tokenOutputSatoshis: ftAOutput.satoshis,
-          otherOutputArray: new Bytes(toHex(otherOutputArrayA)),
-        }).toScript() as mvc.Script
-      )
+      const unlockCheckACall = unlockContractA.unlock({
+        txPreimage: unlockCheckPreimageA,
+        prevouts: new Bytes(prevouts.toHex()),
+        tokenScript: new Bytes(tokenALockingScript.toHex()),
+        tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayA.toString('hex')),
+        tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayA.toString('hex')),
+        tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayA.toString('hex')),
+        inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayA)),
+        inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayA)),
+        nOutputs: txComposer.getTx().outputs.length,
+        tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayA.toString('hex')),
+        tokenOutputSatoshis: ftAOutput.satoshis,
+        otherOutputArray: new Bytes(toHex(otherOutputArrayA)),
+      })
+      if (this.debug) {
+        let ret = unlockCheckACall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: unlockCheckAInputIndex,
+          inputSatoshis: txComposer.getInput(unlockCheckAInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
+      txComposer.getInput(unlockCheckAInputIndex).setScript(unlockCheckACall.toScript() as mvc.Script)
 
-      // 5.6 解锁 amountCheck B（FT-B，仅 TRADE）
+      // 5.6 解锁 amountCheck B（FT-B，仅 TRADE）：FT-B 输出在 index 0（output 0 = FT-B 给卖家）
       if (op === FT_SWAP_LOCK_OP.TRADE) {
-        const ftBOutputIndex = 1
+        const ftBOutputIndex = 0
         const ftBOutput = txComposer.getTx().outputs[ftBOutputIndex]
         let otherOutputArrayB = Buffer.alloc(0)
         txComposer.getTx().outputs.forEach((output, index) => {
@@ -2642,22 +2682,29 @@ export class FtManager {
             )
           )
         )
-        txComposer.getInput(unlockCheckBInputIndex).setScript(
-          unlockContractB.unlock({
-            txPreimage: unlockCheckPreimageB,
-            prevouts: new Bytes(prevouts.toHex()),
-            tokenScript: new Bytes(ftB.lockingScript.toHex()),
-            tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayB.toString('hex')),
-            tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayB.toString('hex')),
-            tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayB.toString('hex')),
-            inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayB)),
-            inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayB)),
-            nOutputs: txComposer.getTx().outputs.length,
-            tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayB.toString('hex')),
-            tokenOutputSatoshis: ftBOutput.satoshis,
-            otherOutputArray: new Bytes(toHex(otherOutputArrayB)),
-          }).toScript() as mvc.Script
-        )
+        const unlockCheckBCall = unlockContractB.unlock({
+          txPreimage: unlockCheckPreimageB,
+          prevouts: new Bytes(prevouts.toHex()),
+          tokenScript: new Bytes(ftB.lockingScript.toHex()),
+          tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayB.toString('hex')),
+          tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayB.toString('hex')),
+          tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayB.toString('hex')),
+          inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayB)),
+          inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayB)),
+          nOutputs: txComposer.getTx().outputs.length,
+          tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayB.toString('hex')),
+          tokenOutputSatoshis: ftBOutput.satoshis,
+          otherOutputArray: new Bytes(toHex(otherOutputArrayB)),
+        })
+        if (this.debug) {
+          let ret = unlockCheckBCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: unlockCheckBInputIndex,
+            inputSatoshis: txComposer.getInput(unlockCheckBInputIndex).output.satoshis,
+          })
+          if (!ret.success) throw ret
+        }
+        txComposer.getInput(unlockCheckBInputIndex).setScript(unlockCheckBCall.toScript() as mvc.Script)
       }
     }
 
@@ -3025,21 +3072,28 @@ export class FtManager {
         'ftUtxos must be provided by the external layer.'
       )
     }
-    paramFtUtxos.forEach((v) => {
-      if (v.wif) {
-        let privateKey = new mvc.PrivateKey(v.wif)
-        ftUtxoPrivateKeys.push(privateKey)
-        publicKeys.push(privateKey.toPublicKey())
-      }
-    })
-
     paramFtUtxos.forEach((v, index) => {
+      let privateKey: mvc.PrivateKey | undefined
+      let publicKey: mvc.PublicKey | undefined
+      if (v.wif) {
+        privateKey = new mvc.PrivateKey(v.wif)
+        publicKey = privateKey.toPublicKey()
+      } else if (senderPrivateKey) {
+        // ⚠️ senderWif/senderPrivateKey 是 FT 输入的兜底签名密钥：
+        //    业务层组装 ParamFtUtxo 时经常只传 txHex/preTxHex 不传 wif，
+        //    这里用 transfer/createSwapOrder/sell 等入口传入的 senderPrivateKey 补齐，
+        //    避免 _transfer 里静默使用 PLACE_HOLDER_PUBKEY/SIG 导致广播 -26 OP_EQUALVERIFY。
+        privateKey = senderPrivateKey
+        publicKey = senderPublicKey || senderPrivateKey.toPublicKey()
+      }
+      ftUtxoPrivateKeys.push(privateKey)
+      publicKeys.push(publicKey)
       ftUtxos.push({
         txId: v.txId,
         outputIndex: v.outputIndex,
         tokenAddress: new mvc.Address(v.tokenAddress, this.network),
         tokenAmount: new BN(v.tokenAmount.toString()),
-        publicKey: publicKeys[index],
+        publicKey,
         txHex: v.txHex,      // ← 补（perfectFtUtxosInfo 检查）
         preTxHex: v.preTxHex, // ← 补（satotxInfo 构建用）
       })
@@ -3658,20 +3712,29 @@ export class FtManager {
         tokenContract.setDataPart(toHex(dataPart))
 
         // 三轮签名策略：
-        //   第 0 轮：占位符签名用于估算交易大小
+        //   第 0 轮：占位符签名用于估算交易大小（仅 signer 模式）
         //   第 1 轮：从 signer（或本地私钥）获取真实签名
         let ftSigHex: string
         let ftPubKeyHex: string
         if (senderPrivateKey) {
           ftPubKeyHex = toHex(senderPrivateKey.toPublicKey().toBuffer())
           ftSigHex = toHex(txComposer.getTxFormatSig(senderPrivateKey, inputIndex))
-        } else if (c === 1 && this.signer) {
-          const sr = await this.signer.signInput(txComposer, inputIndex)
-          ftSigHex = sr.sig
-          ftPubKeyHex = sr.pubKeyHex
+        } else if (this.signer) {
+          if (c === 1) {
+            const sr = await this.signer.signInput(txComposer, inputIndex)
+            ftSigHex = sr.sig
+            ftPubKeyHex = sr.pubKeyHex
+          } else {
+            ftPubKeyHex = ftUtxo.publicKey ? ftUtxo.publicKey.toHex() : PLACE_HOLDER_PUBKEY
+            ftSigHex = PLACE_HOLDER_SIG
+          }
         } else {
-          ftPubKeyHex = ftUtxo.publicKey ? ftUtxo.publicKey.toHex() : PLACE_HOLDER_PUBKEY
-          ftSigHex = PLACE_HOLDER_SIG
+          // ⚠️ 不能静默使用占位符签名：OP_TRANSFER 要求 hash160(senderPubKey) == tokenAddress，
+          //    占位符上链必然 OP_EQUALVERIFY 失败（-26）。必须提供 ftUtxo.wif / senderWif / signer。
+          throw new CodeError(
+            ErrCode.EC_INVALID_ARGUMENT,
+            `FT utxo ${ftUtxo.txId}:${ftUtxo.outputIndex} cannot be signed: missing wif on ParamFtUtxo, missing senderWif/senderPrivateKey, and no signer. Add wif to the FT utxo or pass a signer.`
+          )
         }
 
         // unlock the token utxo

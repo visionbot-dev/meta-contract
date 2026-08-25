@@ -13,5 +13,3 @@ export { ISigner, LocalSigner, MetaletSigner, signOneInput } from './signer'
 export { MetaletLike, MetaletSignTxParams, MetaletSignTxResult, SignOneResult } from './signer'
 
 export { NftManager, FtManager }
-
-export * from './synthesis'

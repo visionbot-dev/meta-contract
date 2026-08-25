@@ -1,5 +1,0 @@
-export * as synthVaultProto from './contract-proto/synthVault.proto'
-export * as recipeTicketProto from './contract-proto/recipeTicket.proto'
-export * from './contract-factory/synthVault'
-export * from './contract-factory/recipeTicket'
-export * from './merkle'

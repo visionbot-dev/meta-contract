@@ -12,9 +12,12 @@
     "compile-mcp01-dev": "node tools/compiler.js --mcp01  --debug",
     "compile-mcp02": "node tools/compiler.js --mcp02",
     "compile-mcp02-dev": "node tools/compiler.js --mcp02  --debug",
+    "compile-synthesis": "node tools/compile-synthesis.js",
+    "compile-synthesis-dev": "node tools/compile-synthesis.js --debug",
     "build": "npx gulp",
     "build:watch": "gulp dev",
-    "rollup": "rollup --config"
+    "rollup": "rollup --config",
+    "stest-synthesis": "mocha -r ts-node/register tests/scrypt/synthesis.scrypttest.ts --reporter spec --timeout 600000"
   },
   "keywords": [
     "Smart Contract",

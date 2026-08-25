@@ -7,6 +7,7 @@ import {
   Ripemd160,
   Sig,
   SigHashPreimage,
+  signTx,
   toHex,
 } from '../scryptlib'
 import { CodeError, ErrCode } from '../common/error'
@@ -53,6 +54,7 @@ import {
   TOKEN_UNLOCK_TYPE,
   TokenUnlockContractCheckFactory,
 } from '../mcp02/contract-factory/tokenUnlockContractCheck'
+import { TOKEN_SELL_OP, TokenSellFactory } from './contract-factory/tokenSell'
 import { Buffer } from 'buffer'
 
 const jsonDescr = require('./contract-desc/txUtil_desc.json')
@@ -61,6 +63,15 @@ const { TxInputProof, TxOutputProof } = buildTypeClasses(jsonDescr)
 const Signature = mvc.crypto.Signature
 const _ = mvc.deps._
 export const sighashType = Signature.SIGHASH_ALL | Signature.SIGHASH_FORKID
+
+type FtSellUtxo = {
+  txId: string
+  outputIndex: number
+  sellerAddress: string
+  price: number
+  /** 挂单交易原始 hex（由外部业务层传入，用于重建锁定脚本） */
+  txHex?: string
+}
 
 ContractUtil.init()
 
@@ -1029,6 +1040,815 @@ export class FtManager {
       routeCheckTxHex,
       txid: txComposer.getTxId(),
     }
+  }
+
+  /**
+   * 挂单卖出 FT 换取 SPACE。
+   * Tx1: 创建 TokenSell 合约
+   * Tx2/Tx3: 复用 transfer 把 FT 锁定到 TokenSell 合约地址
+   */
+  public async sell({
+    codehash,
+    genesis,
+    ftUtxo,
+    sellerWif,
+    price,
+    utxos: utxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellerWif: string
+    price: number
+    utxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    const startTime = Date.now()
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+
+    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
+    const sellerPublicKey = sellerPrivateKey.toPublicKey()
+    const sellerAddress = sellerPublicKey.toAddress(this.network)
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in sell operation, please merge it first.'
+      )
+    }
+
+    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis, sellerPrivateKey, sellerPublicKey)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+    const tokenUtxo = ftUtxos[0]
+    if (tokenUtxo.tokenAddress.toString() != sellerAddress.toString()) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'FT seller should be the FT owner!')
+    }
+
+    const tokenSellContract = TokenSellFactory.createContract({
+      mvcRecAddr: new Ripemd160(toHex(sellerAddress.hashBuffer)),
+      mvcRecAmount: price,
+      tokenCodeHash: new Bytes(toHex(ftProto.getContractCodeHash(tokenUtxo.lockingScript.toBuffer()))),
+      tokenID: new Bytes(toHex(ftProto.getTokenID(tokenUtxo.lockingScript.toBuffer()))),
+    })
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    // Tx1: 创建 TokenSell 挂单输出
+    const sellTxComposer = new TxComposer()
+    const sellP2pkhInputIndexes = addP2PKHInputs(sellTxComposer, utxos)
+    const sellOutputIndex = addContractOutput({
+      txComposer: sellTxComposer,
+      lockingScript: tokenSellContract.lockingScript,
+      dustCalculator: this.dustCalculator,
+    })
+    const sellChangeOutputIndex = addChangeOutput(sellTxComposer, middleAddress, this.feeb)
+    unlockP2PKHInputs(sellTxComposer, sellP2pkhInputIndexes, utxoPrivateKeys)
+    checkFeeRate(sellTxComposer, this.feeb)
+
+    const tokenSellAddress = new mvc.Address(
+      TokenUtil.getScriptHashBuf(tokenSellContract.lockingScript.toBuffer()),
+      this.network
+    )
+
+    // Tx2/Tx3: 把 FT 锁定到 TokenSell 合约地址
+    const transferResult = await this.transfer({
+      codehash,
+      genesis,
+      receivers: [{ address: tokenSellAddress.toString(), amount: tokenUtxo.tokenAmount.toString() }],
+      senderWif: sellerWif,
+      ftUtxos: [ftUtxo],
+      ftChangeAddress: sellerAddress,
+      utxos: [
+        {
+          txId: sellTxComposer.getTxId(),
+          outputIndex: sellChangeOutputIndex,
+          satoshis: sellTxComposer.getOutput(sellChangeOutputIndex).satoshis,
+          address: middleAddress.toString(),
+          wif: middleKey.toString(),
+        },
+      ],
+      changeAddress: middleAddress,
+      middleChangeAddress: middleAddress,
+      middlePrivateKey: middleKey.toString(),
+      opreturnData,
+    })
+
+    const runtime = Date.now() - startTime
+    return {
+      sellTx: sellTxComposer.getTx(),
+      sellTxHex: sellTxComposer.getRawHex(),
+      sellTxId: sellTxComposer.getTxId(),
+      ...transferResult,
+      runtime,
+    }
+  }
+
+  /**
+   * 下架 FT 挂单，FT 退回卖家（对齐 NftManager.cancelSell）。
+   */
+  public async cancelSell({
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    sellerWif,
+    utxos: utxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtSellUtxo
+    sellerWif: string
+    utxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    const startTime = Date.now()
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+
+    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
+    const sellerAddress = sellerPrivateKey.toAddress(this.network)
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in cancelSell operation, please merge it first.'
+      )
+    }
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    const { unlockCheckTxComposer, txComposer } = await this._createSellOrderTx({
+      version: determineCodehashVersion(codehash),
+      codehash,
+      genesis,
+      ftUtxo,
+      sellUtxo,
+      sellerPrivateKey,
+      sellerAddress,
+      op: TOKEN_SELL_OP.CANCEL,
+      utxos,
+      utxoPrivateKeys,
+      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
+      middlePrivateKey: middleKey,
+      middleChangeAddress: middleAddress,
+      opreturnData,
+    })
+
+    const runtime = Date.now() - startTime
+    return {
+      tx: txComposer.getTx(),
+      txHex: txComposer.getRawHex(),
+      txid: txComposer.getTxId(),
+      unlockCheckTx: unlockCheckTxComposer.getTx(),
+      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
+      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
+      runtime,
+    }
+  }
+
+  /**
+   * 使用 SPACE 买入挂单中的 FT（对齐 NftManager.buy）。
+   */
+  public async buy({
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    buyerWif,
+    buyerAddress,
+    utxos: utxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtSellUtxo
+    buyerWif?: string
+    buyerAddress?: string | mvc.Address
+    utxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    const startTime = Date.now()
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+
+    let buyerAddr: mvc.Address
+    if (buyerAddress) {
+      buyerAddr = new mvc.Address(buyerAddress, this.network)
+    } else {
+      buyerAddr = new mvc.PrivateKey(buyerWif).toAddress(this.network)
+    }
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in buy operation, please merge it first.'
+      )
+    }
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    const { unlockCheckTxComposer, txComposer } = await this._createSellOrderTx({
+      version: determineCodehashVersion(codehash),
+      codehash,
+      genesis,
+      ftUtxo,
+      sellUtxo,
+      sellerPrivateKey: undefined as any,
+      sellerAddress: new mvc.Address(sellUtxo.sellerAddress, this.network),
+      buyerAddress: buyerAddr,
+      op: TOKEN_SELL_OP.SELL,
+      utxos,
+      utxoPrivateKeys,
+      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
+      middlePrivateKey: middleKey,
+      middleChangeAddress: middleAddress,
+      opreturnData,
+    })
+
+    const runtime = Date.now() - startTime
+    return {
+      tx: txComposer.getTx(),
+      txHex: txComposer.getRawHex(),
+      txid: txComposer.getTxId(),
+      unlockCheckTx: unlockCheckTxComposer.getTx(),
+      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
+      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
+      runtime,
+    }
+  }
+
+  /**
+   * 预估挂单卖出 FT 所需手续费（1 进 1 出）。
+   * 包含：创建 TokenSell 的 Tx1 费用 + FT 锁定到 TokenSell 的 transfer 费用。
+   */
+  public async getSellEstimateFee({
+    codehash,
+    genesis,
+    ftUtxo,
+    opreturnData,
+    utxoMaxCount = 3,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    opreturnData?: any
+    utxoMaxCount?: number
+  }) {
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+
+    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+    const tokenUtxo = ftUtxos[0]
+    const sellLockingSize = TokenSellFactory.getLockingScriptSize()
+
+    // Tx1: 创建 TokenSell 挂单
+    const stx1 = new SizeTransaction(this.feeb, this.dustCalculator)
+    for (let i = 0; i < utxoMaxCount; i++) {
+      stx1.addP2PKHInput()
+    }
+    stx1.addOutput(sellLockingSize)
+    if (opreturnData) {
+      stx1.addOpReturnOutput(mvc.Script.buildSafeDataOut(opreturnData).toBuffer().length)
+    }
+    stx1.addP2PKHOutput()
+    const sellTxFee = stx1.getFee()
+
+    // Tx2/Tx3: FT 锁定到 TokenSell 地址（1 进 1 出）
+    const tokenTransferType = TokenTransferCheckFactory.getOptimumType(1, 1)
+    const transferFee = this._calTransferEstimateFee({
+      p2pkhInputNum: 1,
+      tokenInputArray: ftUtxos,
+      tokenOutputArray: [{ address: this.zeroAddress, tokenAmount: tokenUtxo.tokenAmount }],
+      tokenTransferType,
+      opreturnData,
+    })
+
+    return sellTxFee + transferFee
+  }
+
+  /**
+   * 预估买家买入 FT 所需手续费（1 进 1 出）。
+   */
+  public async getBuyEstimateFee({
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    opreturnData,
+    utxoMaxCount = 3,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtSellUtxo
+    opreturnData?: any
+    utxoMaxCount?: number
+  }) {
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+    if (!sellUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
+    }
+    const sellTx = new mvc.Transaction(sellUtxo.txHex)
+    const sellUtxoSatoshis = sellTx.outputs[sellUtxo.outputIndex].satoshis
+
+    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+
+    return this._calSellOrderEstimateFee({
+      tokenUtxoSatoshis: ftUtxos[0].satoshis,
+      sellUtxoSatoshis,
+      op: TOKEN_SELL_OP.SELL,
+      opreturnData,
+      p2pkhInputNum: utxoMaxCount,
+    })
+  }
+
+  /**
+   * 预估下架 FT 挂单所需手续费（1 进 1 出）。
+   */
+  public async getCancelSellEstimateFee({
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    opreturnData,
+    utxoMaxCount = 3,
+  }: {
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtSellUtxo
+    opreturnData?: any
+    utxoMaxCount?: number
+  }) {
+    checkParamGenesis(genesis)
+    checkParamCodehash(codehash)
+    if (!sellUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
+    }
+    const sellTx = new mvc.Transaction(sellUtxo.txHex)
+    const sellUtxoSatoshis = sellTx.outputs[sellUtxo.outputIndex].satoshis
+
+    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+
+    return this._calSellOrderEstimateFee({
+      tokenUtxoSatoshis: ftUtxos[0].satoshis,
+      sellUtxoSatoshis,
+      op: TOKEN_SELL_OP.CANCEL,
+      opreturnData,
+      p2pkhInputNum: utxoMaxCount,
+    })
+  }
+
+  private _calSellOrderEstimateFee({
+    tokenUtxoSatoshis,
+    sellUtxoSatoshis,
+    op,
+    opreturnData,
+    p2pkhInputNum = 3,
+  }: {
+    tokenUtxoSatoshis: number
+    sellUtxoSatoshis: number
+    op: TOKEN_SELL_OP
+    opreturnData?: any
+    p2pkhInputNum?: number
+  }): number {
+    // 当前只支持 1 进 1 出
+    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_2_OUT_5
+    const routeCheckLockingSize = TokenUnlockContractCheckFactory.getLockingScriptSize(tokenUnlockType)
+    const routeCheckUnlockingSize = TokenUnlockContractCheckFactory.calUnlockingScriptSize(
+      tokenUnlockType,
+      p2pkhInputNum,
+      1,
+      1,
+      opreturnData
+    )
+    const dummyUnlockCheck = TokenUnlockContractCheckFactory.getDummyInstance(tokenUnlockType)
+    const tokenUnlockingSize = TokenFactory.calUnlockingScriptSize(dummyUnlockCheck, p2pkhInputNum, 1, 1)
+    const tokenSellUnlockingSize = TokenSellFactory.calUnlockingScriptSize(op)
+    const tokenSellLockingSize = TokenSellFactory.getLockingScriptSize()
+    const tokenLockingSize = TokenFactory.getLockingScriptSize()
+
+    // Tx1: 创建 TokenUnlockContractCheck
+    const stx1 = new SizeTransaction(this.feeb, this.dustCalculator)
+    for (let i = 0; i < p2pkhInputNum; i++) {
+      stx1.addP2PKHInput()
+    }
+    stx1.addOutput(routeCheckLockingSize)
+    stx1.addP2PKHOutput()
+
+    // Tx2: 主交易
+    const stx = new SizeTransaction(this.feeb, this.dustCalculator)
+    stx.addInput(tokenSellUnlockingSize, sellUtxoSatoshis)
+    stx.addInput(tokenUnlockingSize, tokenUtxoSatoshis)
+    for (let i = 0; i < p2pkhInputNum; i++) {
+      stx.addP2PKHInput()
+    }
+    stx.addInput(routeCheckUnlockingSize, this.dustCalculator.getDustThreshold(routeCheckLockingSize))
+
+    if (op === TOKEN_SELL_OP.SELL) {
+      stx.addP2PKHOutput() // SPACE 给卖家
+      stx.addOutput(tokenLockingSize) // FT 给买家
+    } else {
+      stx.addOutput(tokenLockingSize) // FT 退回卖家
+    }
+    if (opreturnData) {
+      stx.addOpReturnOutput(mvc.Script.buildSafeDataOut(opreturnData).toBuffer().length)
+    }
+    stx.addP2PKHOutput() // 找零
+    return stx1.getFee() + stx.getFee()
+  }
+
+  private async _createSellOrderTx({
+    version,
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    sellerPrivateKey,
+    sellerAddress,
+    buyerAddress,
+    op,
+    utxos,
+    utxoPrivateKeys,
+    changeAddress,
+    middlePrivateKey,
+    middleChangeAddress,
+    opreturnData,
+  }: {
+    version: number
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtSellUtxo
+    sellerPrivateKey?: mvc.PrivateKey
+    sellerAddress: mvc.Address
+    buyerAddress?: mvc.Address
+    op: TOKEN_SELL_OP
+    utxos: Utxo[]
+    utxoPrivateKeys: mvc.PrivateKey[]
+    changeAddress: mvc.Address
+    middlePrivateKey?: mvc.PrivateKey
+    middleChangeAddress: mvc.Address
+    opreturnData?: any
+  }): Promise<{ unlockCheckTxComposer: TxComposer; txComposer: TxComposer }> {
+    // 1. 预处理 FT UTXO（被 TokenSell 锁定的 FT），当前只支持 1 进 1 出
+    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+    if (ftUtxos.length > 1) {
+      throw new CodeError(ErrCode.EC_TOO_MANY_FT_UTXOS, 'Only 1-in-1-out is supported in sell order operations.')
+    }
+    const defaultFtUtxo = ftUtxos[0]
+
+    if (!sellUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
+    }
+    const sellTx = new mvc.Transaction(sellUtxo.txHex)
+    const sellUtxoInfo = {
+      txId: sellUtxo.txId,
+      outputIndex: sellUtxo.outputIndex,
+      satoshis: sellTx.outputs[sellUtxo.outputIndex].satoshis,
+      lockingScript: sellTx.outputs[sellUtxo.outputIndex].script,
+    }
+
+    const tokenLockingScript = defaultFtUtxo.lockingScript
+    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_2_OUT_5
+    const ftOutputIndex = op === TOKEN_SELL_OP.CANCEL ? 0 : 1
+    const receiver = op === TOKEN_SELL_OP.CANCEL ? sellerAddress : buyerAddress!
+
+    // 2. 创建 TokenUnlockContractCheck
+    const unlockContract = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
+    unlockContract.setFormatedDataPart({
+      inputTokenIndexArray: [1],
+      nSender: 1,
+      tokenCodeHash: toHex(ftProto.getContractCodeHash(tokenLockingScript.toBuffer())),
+      tokenID: toHex(ftProto.getTokenID(tokenLockingScript.toBuffer())),
+      nReceivers: 1,
+      receiverTokenAmountArray: [defaultFtUtxo.tokenAmount],
+      receiverArray: [receiver],
+    })
+
+    // 3. Tx1: 创建解锁检查 UTXO
+    const unlockCheckTxComposer = new TxComposer()
+    const unlockCheckP2pkhInputIndices = addP2PKHInputs(unlockCheckTxComposer, utxos)
+    const unlockCheckOutputIndex = addContractOutput({
+      txComposer: unlockCheckTxComposer,
+      lockingScript: unlockContract.lockingScript,
+      dustCalculator: this.dustCalculator,
+    })
+    const unlockCheckChangeOutputIndex = addChangeOutput(unlockCheckTxComposer, middleChangeAddress, this.feeb)
+    unlockP2PKHInputs(unlockCheckTxComposer, unlockCheckP2pkhInputIndices, utxoPrivateKeys)
+    checkFeeRate(unlockCheckTxComposer, this.feeb)
+
+    const unlockCheckUtxo = {
+      txId: unlockCheckTxComposer.getTxId(),
+      outputIndex: unlockCheckOutputIndex,
+      satoshis: unlockCheckTxComposer.getOutput(unlockCheckOutputIndex).satoshis,
+      lockingScript: unlockCheckTxComposer.getOutput(unlockCheckOutputIndex).script,
+    }
+    const feeUtxo = {
+      txId: unlockCheckTxComposer.getTxId(),
+      outputIndex: unlockCheckChangeOutputIndex,
+      satoshis: unlockCheckTxComposer.getOutput(unlockCheckChangeOutputIndex).satoshis,
+      address: middleChangeAddress,
+    }
+
+    // 4. Tx2: 主交易
+    const txComposer = new TxComposer()
+    const prevouts = new Prevouts()
+
+    const sellInputIndex = txComposer.appendInput(sellUtxoInfo)
+    prevouts.addVout(sellUtxoInfo.txId, sellUtxoInfo.outputIndex)
+
+    const ftInputIndex = txComposer.appendInput(defaultFtUtxo)
+    prevouts.addVout(defaultFtUtxo.txId, defaultFtUtxo.outputIndex)
+
+    const p2pkhInputIndexes = addP2PKHInputs(txComposer, [feeUtxo])
+    prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
+
+    const unlockCheckInputIndex = txComposer.appendInput(unlockCheckUtxo)
+    prevouts.addVout(unlockCheckUtxo.txId, unlockCheckUtxo.outputIndex)
+
+    // 输出：index0 必须与 TokenSell 输入对齐
+    let ftOutputSatoshis = defaultFtUtxo.satoshis
+    if (op === TOKEN_SELL_OP.CANCEL) {
+      const refundScriptBuf = ftProto.getNewTokenScript(
+        tokenLockingScript.toBuffer(),
+        sellerAddress.hashBuffer,
+        defaultFtUtxo.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(refundScriptBuf),
+        satoshis: ftOutputSatoshis,
+      })
+    } else {
+      txComposer.appendP2PKHOutput({ address: sellerAddress, satoshis: sellUtxo.price })
+      const buyScriptBuf = ftProto.getNewTokenScript(
+        tokenLockingScript.toBuffer(),
+        receiver.hashBuffer,
+        defaultFtUtxo.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(buyScriptBuf),
+        satoshis: ftOutputSatoshis,
+      })
+    }
+
+    if (opreturnData) {
+      txComposer.appendOpReturnOutput(opreturnData)
+    }
+
+    // 5. 两轮签名：解锁 FT / TokenSell / unlockCheck
+    let tokenTxHeaderArray = Buffer.alloc(0)
+    let tokenTxHashProofArray = Buffer.alloc(0)
+    let tokenSatoshiBytesArray = Buffer.alloc(0)
+
+    for (let c = 0; c < 2; c++) {
+      txComposer.clearChangeOutput()
+      const changeOutputIndex = txComposer.appendChangeOutput(changeAddress, this.feeb)
+
+      // 5.1 解锁 FT（Token.unlock op=2）
+      const contractTxOutputProof = getTxOutputProof(sellTx, sellUtxoInfo.outputIndex)
+      const dataPartObj = ftProto.parseDataPart(defaultFtUtxo.lockingScript.toBuffer())
+      const dataPart = ftProto.newDataPart(dataPartObj)
+      const tokenContract = TokenFactory.createContract(
+        this.transferCheckCodeHashArray,
+        this.unlockContractCodeHashArray,
+        version
+      )
+      tokenContract.setDataPart(toHex(dataPart))
+
+      const amountCheckTx = unlockCheckTxComposer.getTx()
+      const amountCheckTxOutputProofInfo = new TxOutputProof(
+        TokenUtil.getTxOutputProof(amountCheckTx, unlockCheckOutputIndex)
+      )
+      const amountCheckScriptBuf = amountCheckTx.outputs[unlockCheckOutputIndex].script.toBuffer()
+
+      const prevTokenInputIndex = defaultFtUtxo.prevTokenInputIndex
+      const prevTokenAddress = new Bytes(toHex(defaultFtUtxo.preTokenAddress.hashBuffer))
+      const prevTokenAmount = BigInt(defaultFtUtxo.preTokenAmount.toString(10))
+      const tokenTx = new mvc.Transaction(defaultFtUtxo.satotxInfo.txHex)
+
+      const inputRes = TokenUtil.getTxInputProof(tokenTx, prevTokenInputIndex)
+      const tokenTxInputProof = new TxInputProof(inputRes[0])
+      const tokenTxHeader = inputRes[1] as Bytes
+
+      const prevTokenTxOutputProof = new TxOutputProof(
+        TokenUtil.getTxOutputProof(defaultFtUtxo.prevTokenTx, defaultFtUtxo.prevTokenOutputIndex)
+      )
+      const tokenTxInfoHex = TokenUtil.getTxInfoHex(tokenTx, defaultFtUtxo.outputIndex)
+
+      tokenTxHeaderArray = Buffer.concat([tokenTxHeaderArray, Buffer.from(tokenTxInfoHex.txHeader, 'hex')])
+      const hashProofBuf = Buffer.from(tokenTxInfoHex.txHashProof, 'hex')
+      tokenTxHashProofArray = Buffer.concat([
+        tokenTxHashProofArray,
+        TokenUtil.getUInt32Buf(hashProofBuf.length),
+        hashProofBuf,
+      ])
+      tokenSatoshiBytesArray = Buffer.concat([
+        tokenSatoshiBytesArray,
+        Buffer.from(tokenTxInfoHex.txSatoshi, 'hex'),
+      ])
+
+      const unlockingContract = tokenContract.unlock({
+        txPreimage: txComposer.getInputPreimage(ftInputIndex),
+        prevouts: new Bytes(prevouts.toHex()),
+
+        tokenInputIndex: 0,
+        amountCheckHashIndex: tokenUnlockType - 1,
+        amountCheckInputIndex: unlockCheckInputIndex,
+        amountCheckTxOutputProofInfo,
+        amountCheckScript: new Bytes(amountCheckScriptBuf.toString('hex')),
+
+        prevTokenInputIndex,
+        prevTokenAddress,
+        prevTokenAmount,
+        tokenTxHeader,
+        tokenTxInputProof,
+        prevTokenTxOutputProof,
+
+        senderPubKey: new PubKey(PLACE_HOLDER_PUBKEY),
+        senderSig: new Sig(PLACE_HOLDER_SIG),
+
+        contractInputIndex: sellInputIndex,
+        contractTxOutputProof: new TxOutputProof(contractTxOutputProof),
+
+        operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
+      })
+      txComposer.getInput(ftInputIndex).setScript(unlockingContract.toScript() as mvc.Script)
+
+      if (this.debug) {
+        const ret = unlockingContract.verify({
+          tx: txComposer.getTx(),
+          inputIndex: ftInputIndex,
+          inputSatoshis: txComposer.getInput(ftInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
+
+      // 5.2 解锁 TokenSell
+      const tokenSellContract = TokenSellFactory.createContract({
+        mvcRecAddr: new Ripemd160(toHex(sellerAddress.hashBuffer)),
+        mvcRecAmount: sellUtxo.price,
+        tokenCodeHash: new Bytes(codehash),
+        tokenID: new Bytes(toHex(ftProto.getTokenID(tokenLockingScript.toBuffer()))),
+      })
+      const sellSubScript: any = sellUtxoInfo.lockingScript
+      const sellTxPreimage = new SigHashPreimage(
+        toHex(
+          getPreimage(
+            txComposer.getTx(),
+            sellSubScript.subScript(0),
+            sellUtxoInfo.satoshis,
+            sellInputIndex,
+            Signature.SIGHASH_SINGLE | Signature.SIGHASH_FORKID
+          )
+        )
+      )
+      const unlockSellArgs: any = {
+        txPreimage: sellTxPreimage,
+        op,
+      }
+      if (op === TOKEN_SELL_OP.CANCEL) {
+        unlockSellArgs.tokenScript = new Bytes(tokenLockingScript.toHex())
+        unlockSellArgs.senderPubKey = new PubKey(toHex(sellerPrivateKey!.publicKey.toBuffer()))
+        unlockSellArgs.senderSig = new Sig(
+          toHex(signTx(txComposer.getTx(), sellerPrivateKey!, sellUtxoInfo.lockingScript, sellUtxoInfo.satoshis, sellInputIndex, sighashType))
+        )
+        unlockSellArgs.tokenOutputSatoshis = ftOutputSatoshis
+      }
+      const unlockSellCall = tokenSellContract.unlock(unlockSellArgs)
+      txComposer.getInput(sellInputIndex).setScript(unlockSellCall.toScript() as mvc.Script)
+
+      if (this.debug) {
+        const ret = unlockSellCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: sellInputIndex,
+          inputSatoshis: txComposer.getInput(sellInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
+
+      // 5.3 解锁 unlockCheck
+      const ftOutput = txComposer.getTx().outputs[ftOutputIndex]
+      let otherOutputArray = Buffer.alloc(0)
+      txComposer.getTx().outputs.forEach((output, index) => {
+        if (index != ftOutputIndex) {
+          const outputBuf = Buffer.concat([
+            getUInt64Buf(output.satoshis),
+            writeVarint(output.script.toBuffer()),
+          ])
+          otherOutputArray = Buffer.concat([
+            otherOutputArray,
+            getUInt32Buf(outputBuf.length),
+            outputBuf,
+          ])
+        }
+      })
+
+      const inputTokenAddressArray = defaultFtUtxo.tokenAddress.hashBuffer
+      const inputTokenAmountArray = defaultFtUtxo.tokenAmount.toBuffer({ endian: 'little', size: 8 })
+
+      const tokenOutputIndexArray = Buffer.alloc(4)
+      tokenOutputIndexArray.writeUInt32LE(ftOutputIndex, 0)
+
+      const unlockCheckSub: any = unlockCheckUtxo.lockingScript
+      const unlockCheckPreimage = new SigHashPreimage(
+        toHex(
+          getPreimage(
+            txComposer.getTx(),
+            unlockCheckSub.subScript(0),
+            unlockCheckUtxo.satoshis,
+            unlockCheckInputIndex
+          )
+        )
+      )
+      const unlockCheckCall = unlockContract.unlock({
+        txPreimage: unlockCheckPreimage,
+        prevouts: new Bytes(prevouts.toHex()),
+        tokenScript: new Bytes(tokenLockingScript.toHex()),
+
+        tokenTxHeaderArray: new Bytes(tokenTxHeaderArray.toString('hex')),
+        tokenTxHashProofArray: new Bytes(tokenTxHashProofArray.toString('hex')),
+        tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArray.toString('hex')),
+
+        inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArray)),
+        inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArray)),
+        nOutputs: txComposer.getTx().outputs.length,
+        tokenOutputIndexArray: new Bytes(tokenOutputIndexArray.toString('hex')),
+        tokenOutputSatoshis: ftOutput.satoshis,
+        otherOutputArray: new Bytes(toHex(otherOutputArray)),
+      })
+      txComposer.getInput(unlockCheckInputIndex).setScript(unlockCheckCall.toScript() as mvc.Script)
+
+      if (this.debug) {
+        const ret = unlockCheckCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: unlockCheckInputIndex,
+          inputSatoshis: txComposer.getInput(unlockCheckInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw ret
+      }
+    }
+
+    // 6. 解锁 P2PKH 输入并检查费率
+    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, [middlePrivateKey!])
+    checkFeeRate(txComposer, this.feeb)
+
+    return { unlockCheckTxComposer, txComposer }
   }
 
   private async _pretreatFtUtxos(

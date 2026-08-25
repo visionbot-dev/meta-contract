@@ -1,18 +1,53 @@
 import "../protoheader.scrypt";
+import "tokenProto.scrypt";
 
 contract TokenSell {
 
     Ripemd160 mvcRecAddr;
     int mvcRecAmount;
+    bytes tokenCodeHash;
+    bytes tokenID;
+
+    static const int OP_SELL = 1;
+    static const int OP_CANCEL = 2;
 
     public function unlock(
-        SigHashPreimage txPreimage
+        SigHashPreimage txPreimage,
+        bytes tokenScript,       // only cancel need
+        PubKey senderPubKey,     // only cancel need
+        Sig senderSig,           // only cancel need
+        int tokenOutputSatoshis, // only cancel need
+        int op                   // 1 sell, 2 cancel
     ) {
-        require(Tx.checkPreimageSigHashType(txPreimage, ProtoHeader.SIG_HASH_SINGLE));
+        bytes outputs = b'';
+        if (op == OP_SELL) {
+            bytes outputScript = Utils.buildPublicKeyHashScript(this.mvcRecAddr);
+            outputs = Utils.buildOutput(outputScript, this.mvcRecAmount);
+        }
+        else if (op == OP_CANCEL) {
+            // check seller signature
+            require(hash160(senderPubKey) == this.mvcRecAddr);
+            require(checkSig(senderSig, senderPubKey));
 
-        bytes outputScript = Utils.buildPublicKeyHashScript(this.mvcRecAddr);
-        bytes output = Utils.buildOutput(outputScript, this.mvcRecAmount);
+            // verify the FT being refunded is the listed FT
+            int tokenScriptLen = len(tokenScript);
+            require(TokenProto.getScriptCodeHash(tokenScript, tokenScriptLen) == this.tokenCodeHash);
+            require(TokenProto.getTokenID(tokenScript, tokenScriptLen) == this.tokenID);
 
-        require(hash256(output) == SigHash.hashOutputs(txPreimage));
+            // refund the full FT amount back to the seller
+            bytes newTokenScript = TokenProto.getNewTokenScript(
+                tokenScript,
+                tokenScriptLen,
+                this.mvcRecAddr,
+                TokenProto.getTokenAmount(tokenScript, tokenScriptLen)
+            );
+            outputs = Utils.buildOutput(newTokenScript, tokenOutputSatoshis);
+        }
+        else {
+            require(false);
+        }
+
+        require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
+        require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_SINGLE));
     }
 }

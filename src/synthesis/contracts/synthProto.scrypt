@@ -1,0 +1,181 @@
+import "../../mcp01/contract/protoheader.scrypt";
+import "../../mcp01/contract/txUtil.scrypt";
+
+/**
+ * Shared layout/parsing helpers for the generic synthesis scheme.
+ *
+ * All state is stored in the "data part" appended after the compiled code part.
+ * The data part follows the repo-wide `buildScriptData` convention:
+ *   [fields][dataLen(4B LE)][0xff]
+ * wrapped by OP_RETURN + pushdata header.
+ */
+library SynthProto {
+
+    // ======================= SynthVault data layout =======================
+    // vaultId(20) + recipeRoot(20) + ticketCodeHash(20)
+    // + governorPubKeyHash[3](60) + governorThreshold(1) + timelock(4)
+    static const int VAULT_FIELDS_LEN = 125;
+    static const int VAULT_INNER_LEN = VAULT_FIELDS_LEN + 5; // + dataLen(4) + version(1)
+    static const int VAULT_PUSH_HEADER_LEN = 2;              // 0x4c + len (130 > 75)
+    static const int VAULT_DATA_LEN = VAULT_PUSH_HEADER_LEN + VAULT_INNER_LEN;
+
+    // ======================= RecipeTicket data layout =====================
+    // base: recipeHash(20) + vaultId(20) + executorHash(20) + timelock(4)
+    //       + ftOutCount(1) + nftOutCount(1)                             = 66
+    // ftOut[2]: tokenID(20) + tokenCodeHash(20) + amount(8)
+    //           + receiver(20) + satoshis(8)                             = 76
+    // nftOut[2]: nftID(20) + nftCodeHash(20) + tokenIndex(8)
+    //            + receiver(20) + satoshis(8)                            = 76
+    static const int TICKET_BASE_LEN = 66;
+    static const int TICKET_FT_OUT_LEN = 76;
+    static const int TICKET_NFT_OUT_LEN = 76;
+    static const int TICKET_FIELDS_LEN = TICKET_BASE_LEN + 2 * TICKET_FT_OUT_LEN + 2 * TICKET_NFT_OUT_LEN;
+    static const int TICKET_INNER_LEN = TICKET_FIELDS_LEN + 5;
+    static const int TICKET_PUSH_HEADER_LEN = 3;             // 0x4d + len16 (375 > 255)
+    static const int TICKET_DATA_LEN = TICKET_PUSH_HEADER_LEN + TICKET_INNER_LEN;
+    static const int TICKET_NFT_OUT_BASE = TICKET_BASE_LEN + 2 * TICKET_FT_OUT_LEN;
+
+    static function getVaultFields(bytes script, int slen) : bytes {
+        return script[slen - VAULT_FIELDS_LEN - 5 : slen - 5];
+    }
+
+    static function getVaultId(bytes script, int slen) : bytes {
+        return SynthProto.getVaultFields(script, slen)[0 : 20];
+    }
+
+    static function getRecipeRoot(bytes script, int slen) : bytes {
+        return SynthProto.getVaultFields(script, slen)[20 : 40];
+    }
+
+    static function getTicketCodeHash(bytes script, int slen) : bytes {
+        return SynthProto.getVaultFields(script, slen)[40 : 60];
+    }
+
+    static function getGovernorPubKeyHash(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getVaultFields(script, slen);
+        return fields[60 + i * 20 : 80 + i * 20];
+    }
+
+    static function getGovernorThreshold(bytes script, int slen) : int {
+        return Utils.fromLEUnsigned(SynthProto.getVaultFields(script, slen)[120 : 121]);
+    }
+
+    static function getTimelock(bytes script, int slen) : int {
+        return Utils.fromLEUnsigned(SynthProto.getVaultFields(script, slen)[121 : 125]);
+    }
+
+    static function getTicketFields(bytes script, int slen) : bytes {
+        return script[slen - TICKET_FIELDS_LEN - 5 : slen - 5];
+    }
+
+    static function getTicketRecipeHash(bytes script, int slen) : bytes {
+        return SynthProto.getTicketFields(script, slen)[0 : 20];
+    }
+
+    static function getTicketVaultId(bytes script, int slen) : bytes {
+        return SynthProto.getTicketFields(script, slen)[20 : 40];
+    }
+
+    static function getTicketExecutorHash(bytes script, int slen) : bytes {
+        return SynthProto.getTicketFields(script, slen)[40 : 60];
+    }
+
+    static function getTicketTimelock(bytes script, int slen) : int {
+        return Utils.fromLEUnsigned(SynthProto.getTicketFields(script, slen)[60 : 64]);
+    }
+
+    static function getTicketFtOutCount(bytes script, int slen) : int {
+        return Utils.fromLEUnsigned(SynthProto.getTicketFields(script, slen)[64 : 65]);
+    }
+
+    static function getTicketNftOutCount(bytes script, int slen) : int {
+        return Utils.fromLEUnsigned(SynthProto.getTicketFields(script, slen)[65 : 66]);
+    }
+
+    static function getTicketFtOutTokenID(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_BASE_LEN + i * TICKET_FT_OUT_LEN;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketFtOutTokenCodeHash(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_BASE_LEN + i * TICKET_FT_OUT_LEN + 20;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketFtOutAmount(bytes script, int slen, int i) : int {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_BASE_LEN + i * TICKET_FT_OUT_LEN + 40;
+        return Utils.fromLEUnsigned(fields[pos : pos + 8]);
+    }
+
+    static function getTicketFtOutReceiver(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_BASE_LEN + i * TICKET_FT_OUT_LEN + 48;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketFtOutSatoshis(bytes script, int slen, int i) : int {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_BASE_LEN + i * TICKET_FT_OUT_LEN + 68;
+        return Utils.fromLEUnsigned(fields[pos : pos + 8]);
+    }
+
+    static function getTicketNftOutTokenID(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_NFT_OUT_BASE + i * TICKET_NFT_OUT_LEN;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketNftOutTokenCodeHash(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_NFT_OUT_BASE + i * TICKET_NFT_OUT_LEN + 20;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketNftOutTokenIndex(bytes script, int slen, int i) : int {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_NFT_OUT_BASE + i * TICKET_NFT_OUT_LEN + 40;
+        return Utils.fromLEUnsigned(fields[pos : pos + 8]);
+    }
+
+    static function getTicketNftOutReceiver(bytes script, int slen, int i) : bytes {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_NFT_OUT_BASE + i * TICKET_NFT_OUT_LEN + 48;
+        return fields[pos : pos + 20];
+    }
+
+    static function getTicketNftOutSatoshis(bytes script, int slen, int i) : int {
+        bytes fields = SynthProto.getTicketFields(script, slen);
+        int pos = TICKET_NFT_OUT_BASE + i * TICKET_NFT_OUT_LEN + 68;
+        return Utils.fromLEUnsigned(fields[pos : pos + 8]);
+    }
+
+    // ============================ generic helpers =========================
+    // Code part is everything before the data part (data part already includes
+    // the pushdata header, dataLen and version; OP_RETURN belongs to codePart).
+    static function getCodePart(bytes script, int slen, int dataLen) : bytes {
+        return script[: slen - dataLen];
+    }
+
+    // Simple 4-level Merkle proof (max 16 recipes).
+    // proof = [sibling(20B) + isRight(1B)] * 4
+    static function verifyMerkleProof(bytes leaf, bytes proof, bytes root) : bool {
+        bytes h = leaf;
+        int pos = 0;
+        loop (4) : i {
+            bytes sibling = proof[pos : pos + 20];
+            int isRight = Utils.fromLEUnsigned(proof[pos + 20 : pos + 21]);
+            pos += 21;
+            if (isRight == 0) {
+                h = hash160(h + sibling);
+            }
+            else {
+                h = hash160(sibling + h);
+            }
+        }
+        require(h == root);
+        return true;
+    }
+}

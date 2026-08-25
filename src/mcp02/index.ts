@@ -74,6 +74,7 @@ type FtSellUtxo = {
   txHex?: string
 }
 
+/** 内部使用的卖家 FtSwapLock 挂单信息（旧 _createFtForFtOrderTx 使用） */
 type FtForFtSellUtxo = {
   txId: string
   outputIndex: number
@@ -85,6 +86,7 @@ type FtForFtSellUtxo = {
   txHex?: string
 }
 
+/** 内部使用的买家 FtSwapLock 挂单信息（旧 _createFtForFtOrderTx 使用） */
 type FtSwapLockUtxo = {
   txId: string
   outputIndex: number
@@ -92,6 +94,7 @@ type FtSwapLockUtxo = {
   /** 创建锁仓合约的交易原始 hex（由外部业务层传入，用于重建锁定脚本） */
   txHex?: string
 }
+
 
 ContractUtil.init()
 
@@ -160,7 +163,7 @@ function parseSensibleID(sensibleID: string) {
   }
 }
 
-type Utxo = {
+export type Utxo = {
   txId: string
   outputIndex: number
   satoshis: number
@@ -182,12 +185,12 @@ type ParamUtxo = {
   address?: string | mvc.Address
 }
 
-type Purse = {
+export type Purse = {
   privateKey: mvc.PrivateKey
   address: mvc.Address
 }
 
-type Mcp02Options = {
+export type Mcp02Options = {
   network?: API_NET
   purse?: string
   signer?: ISigner
@@ -202,7 +205,7 @@ type TokenReceiver = {
   amount: string
 }
 
-type ParamFtUtxo = {
+export type ParamFtUtxo = {
   txId: string
   outputIndex: number
   tokenAddress: string
@@ -214,7 +217,7 @@ type ParamFtUtxo = {
   preTxHex?: string
 }
 
-type FtUtxo = {
+export type FtUtxo = {
   txId: string
   outputIndex: number
   satoshis?: number
@@ -254,10 +257,10 @@ type FtUtxo = {
 
 export class FtManager {
   private network: API_NET
-  private zeroAddress: mvc.Address
+  protected zeroAddress: mvc.Address
   private purse: Purse
-  private feeb: number
-  private dustCalculator?: DustCalculator
+  protected feeb: number
+  protected dustCalculator?: DustCalculator
   transferCheckCodeHashArray: Bytes[]
   unlockContractCodeHashArray: Bytes[]
   private debug: boolean
@@ -1090,7 +1093,6 @@ export class FtManager {
     middleWif?: string
     opreturnData?: any
   }) {
-    const startTime = Date.now()
     checkParamGenesis(genesis)
     checkParamCodehash(codehash)
 
@@ -1170,13 +1172,11 @@ export class FtManager {
       opreturnData,
     })
 
-    const runtime = Date.now() - startTime
     return {
       sellTx: sellTxComposer.getTx(),
       sellTxHex: sellTxComposer.getRawHex(),
       sellTxId: sellTxComposer.getTxId(),
       ...transferResult,
-      runtime,
     }
   }
 
@@ -1206,7 +1206,6 @@ export class FtManager {
     middleWif?: string
     opreturnData?: any
   }) {
-    const startTime = Date.now()
     checkParamGenesis(genesis)
     checkParamCodehash(codehash)
 
@@ -1248,7 +1247,6 @@ export class FtManager {
       opreturnData,
     })
 
-    const runtime = Date.now() - startTime
     return {
       tx: txComposer.getTx(),
       txHex: txComposer.getRawHex(),
@@ -1256,7 +1254,6 @@ export class FtManager {
       unlockCheckTx: unlockCheckTxComposer.getTx(),
       unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
       unlockCheckTxId: unlockCheckTxComposer.getTxId(),
-      runtime,
     }
   }
 
@@ -1288,7 +1285,6 @@ export class FtManager {
     middleWif?: string
     opreturnData?: any
   }) {
-    const startTime = Date.now()
     checkParamGenesis(genesis)
     checkParamCodehash(codehash)
 
@@ -1335,7 +1331,6 @@ export class FtManager {
       opreturnData,
     })
 
-    const runtime = Date.now() - startTime
     return {
       tx: txComposer.getTx(),
       txHex: txComposer.getRawHex(),
@@ -1343,7 +1338,6 @@ export class FtManager {
       unlockCheckTx: unlockCheckTxComposer.getTx(),
       unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
       unlockCheckTxId: unlockCheckTxComposer.getTxId(),
-      runtime,
     }
   }
 
@@ -1532,29 +1526,368 @@ export class FtManager {
     return stx1.getFee() + stx.getFee()
   }
 
+
   /**
-   * 预估 FT-FT 挂单卖出 FT-A 所需手续费（1 进 1 出）。
+   * 挂单：创建 FtSwapLock 并把 FT 锁定进去，返回锁仓交易信息。
+   * 场景 1：卖家挂 FT-A 换 FT-B；
+   * 场景 2：买家也可以先挂 FT-B 换 FT-A，再由任何一方/第三方撮合。
    */
-  public async getSellForFtEstimateFee({
-    codehash,
-    genesis,
-    ftUtxo,
+  public async createSwapOrder({
+    lockTokenCodeHash,
+    lockTokenGenesis,
+    lockTokenUtxo,
+    ownerWif,
+    wantTokenCodeHash,
+    wantTokenId,
+    wantAmount,
+    feeUtxos: feeUtxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    lockTokenCodeHash: string
+    lockTokenGenesis: string
+    lockTokenUtxo: ParamFtUtxo
+    ownerWif: string
+    wantTokenCodeHash: string
+    wantTokenId: string
+    wantAmount: number
+    feeUtxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    checkParamGenesis(lockTokenGenesis)
+    checkParamCodehash(lockTokenCodeHash)
+
+    const ownerPrivateKey = new mvc.PrivateKey(ownerWif)
+    const ownerPublicKey = ownerPrivateKey.toPublicKey()
+    const ownerAddress = ownerPublicKey.toAddress(this.network)
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(feeUtxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in createSwapOrder operation, please merge it first.'
+      )
+    }
+
+    let ftUtxoInfo = await this._pretreatFtUtxos(
+      [lockTokenUtxo],
+      lockTokenCodeHash,
+      lockTokenGenesis,
+      ownerPrivateKey,
+      ownerPublicKey
+    )
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, lockTokenGenesis)
+    const tokenUtxo = ftUtxos[0]
+    if (tokenUtxo.tokenAddress.toString() != ownerAddress.toString()) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'FT should belong to the swap order owner!')
+    }
+
+    const contract = FtSwapLockFactory.createContract({
+      owner: new Ripemd160(toHex(ownerAddress.hashBuffer)),
+      targetTokenCodeHash: new Bytes(wantTokenCodeHash),
+      targetTokenID: new Bytes(wantTokenId),
+      targetAmount: wantAmount,
+    })
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    // Tx1: 创建 FtSwapLock 挂单输出
+    const sellTxComposer = new TxComposer()
+    const sellP2pkhInputIndexes = addP2PKHInputs(sellTxComposer, utxos)
+    const sellOutputIndex = addContractOutput({
+      txComposer: sellTxComposer,
+      lockingScript: contract.lockingScript,
+      dustCalculator: this.dustCalculator,
+    })
+    const sellChangeOutputIndex = addChangeOutput(sellTxComposer, middleAddress, this.feeb)
+    unlockP2PKHInputs(sellTxComposer, sellP2pkhInputIndexes, utxoPrivateKeys)
+    checkFeeRate(sellTxComposer, this.feeb)
+
+    const contractAddress = new mvc.Address(
+      TokenUtil.getScriptHashBuf(contract.lockingScript.toBuffer()),
+      this.network
+    )
+
+    // Tx2/Tx3: 把 FT 锁定到 FtSwapLock 合约地址
+    const transferResult = await this.transfer({
+      codehash: lockTokenCodeHash,
+      genesis: lockTokenGenesis,
+      receivers: [{ address: contractAddress.toString(), amount: tokenUtxo.tokenAmount.toString() }],
+      senderWif: ownerWif,
+      ftUtxos: [lockTokenUtxo],
+      ftChangeAddress: ownerAddress,
+      utxos: [
+        {
+          txId: sellTxComposer.getTxId(),
+          outputIndex: sellChangeOutputIndex,
+          satoshis: sellTxComposer.getOutput(sellChangeOutputIndex).satoshis,
+          address: middleAddress.toString(),
+          wif: middleKey.toString(),
+        },
+      ],
+      changeAddress: middleAddress,
+      middleChangeAddress: middleAddress,
+      middlePrivateKey: middleKey.toString(),
+      opreturnData,
+    })
+
+    return {
+      sellTx: sellTxComposer.getTx(),
+      sellTxHex: sellTxComposer.getRawHex(),
+      sellTxId: sellTxComposer.getTxId(),
+      sellOutputIndex,
+      ...transferResult,
+    }
+  }
+
+  /**
+   * 下架：FtSwapLock OP_REFUND，把 FT 退回挂单 owner。
+   */
+  public async cancelSwapOrder({
+    lockUtxo,
+    tokenCodeHash,
+    tokenGenesis,
+    tokenUtxo,
+    ownerWif,
+    feeUtxos: feeUtxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    lockUtxo: FtSwapLockUtxo
+    tokenCodeHash: string
+    tokenGenesis: string
+    tokenUtxo: ParamFtUtxo
+    ownerWif: string
+    feeUtxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    checkParamGenesis(tokenGenesis)
+    checkParamCodehash(tokenCodeHash)
+    if (!lockUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'lockUtxo.txHex must be provided by the external layer.')
+    }
+
+    const ownerPrivateKey = new mvc.PrivateKey(ownerWif)
+    const ownerAddress = ownerPrivateKey.toAddress(this.network)
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(feeUtxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in cancelSwapOrder operation, please merge it first.'
+      )
+    }
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    const sellUtxo: FtForFtSellUtxo = {
+      txId: lockUtxo.txId,
+      outputIndex: lockUtxo.outputIndex,
+      sellerAddress: lockUtxo.owner,
+      tokenBAmount: 0,
+      tokenBCodeHash: '',
+      tokenBID: '',
+      txHex: lockUtxo.txHex,
+    }
+
+    const { unlockCheckTxComposer, txComposer } = await this._createFtForFtOrderTx({
+      version: determineCodehashVersion(tokenCodeHash),
+      codehash: tokenCodeHash,
+      genesis: tokenGenesis,
+      ftUtxo: tokenUtxo,
+      sellUtxo,
+      sellerPrivateKey: ownerPrivateKey,
+      sellerAddress: ownerAddress,
+      op: FT_SWAP_LOCK_OP.REFUND,
+      utxos,
+      utxoPrivateKeys,
+      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
+      middlePrivateKey: middleKey,
+      middleChangeAddress: middleAddress,
+      opreturnData,
+    })
+
+    return {
+      tx: txComposer.getTx(),
+      txHex: txComposer.getRawHex(),
+      txid: txComposer.getTxId(),
+      unlockCheckTx: unlockCheckTxComposer.getTx(),
+      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
+      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
+    }
+  }
+
+  /**
+   * 撮合：两个 FtSwapLock 挂单原子互换。
+   * 输入布局：
+   *   0 = FtSwapLock_A（卖家锁 FT-A）
+   *   1 = FtSwapLock_B（买家锁 FT-B）
+   *   2 = SPACE 手续费
+   *   3 = FT-A UTXO
+   *   4 = FT-B UTXO
+   *   5 = TokenUnlockContractCheck_A
+   *   6 = TokenUnlockContractCheck_B
+   * 输出：
+   *   0 = FT-B 给卖家（对齐 FtSwapLock_A）
+   *   1 = FT-A 给买家（对齐 FtSwapLock_B）
+   *   2 = SPACE 找零
+   */
+  public async matchSwap({
+    orderA,
+    orderB,
+    feeUtxos: feeUtxosInput,
+    changeAddress,
+    middleChangeAddress,
+    middleWif,
+    opreturnData,
+  }: {
+    orderA: {
+      lockUtxo: FtSwapLockUtxo
+      tokenCodeHash: string
+      tokenGenesis: string
+      tokenUtxo: ParamFtUtxo
+      wantTokenCodeHash: string
+      wantTokenId: string
+      wantAmount: number
+    }
+    orderB: {
+      lockUtxo: FtSwapLockUtxo
+      tokenCodeHash: string
+      tokenGenesis: string
+      tokenUtxo: ParamFtUtxo
+      wantTokenCodeHash: string
+      wantTokenId: string
+      wantAmount: number
+    }
+    feeUtxos?: ParamUtxo[]
+    changeAddress?: string | mvc.Address
+    middleChangeAddress?: string | mvc.Address
+    middleWif?: string
+    opreturnData?: any
+  }) {
+    checkParamGenesis(orderA.tokenGenesis)
+    checkParamCodehash(orderA.tokenCodeHash)
+    checkParamGenesis(orderB.tokenGenesis)
+    checkParamCodehash(orderB.tokenCodeHash)
+    if (!orderA.lockUtxo.txHex || !orderB.lockUtxo.txHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'orderA.lockUtxo.txHex and orderB.lockUtxo.txHex must be provided by the external layer.'
+      )
+    }
+
+    const { utxos, utxoPrivateKeys } = prepareUtxos(feeUtxosInput)
+    if (utxos.length > 3) {
+      throw new CodeError(
+        ErrCode.EC_UTXOS_MORE_THAN_3,
+        'MVC utxos should be no more than 3 in matchSwap operation, please merge it first.'
+      )
+    }
+
+    let middleAddress: mvc.Address
+    let middleKey: mvc.PrivateKey
+    if (middleChangeAddress) {
+      middleAddress = new mvc.Address(middleChangeAddress, this.network)
+      middleKey = new mvc.PrivateKey(middleWif)
+    } else {
+      middleAddress = utxos[0].address as mvc.Address
+      middleKey = utxoPrivateKeys[0]
+    }
+
+    const sellUtxo: FtForFtSellUtxo = {
+      txId: orderA.lockUtxo.txId,
+      outputIndex: orderA.lockUtxo.outputIndex,
+      sellerAddress: orderA.lockUtxo.owner,
+      tokenBAmount: orderA.wantAmount,
+      tokenBCodeHash: orderA.wantTokenCodeHash,
+      tokenBID: orderA.wantTokenId,
+      txHex: orderA.lockUtxo.txHex,
+    }
+    const buyerLockUtxo: FtSwapLockUtxo = orderB.lockUtxo
+
+    const { unlockCheckTxComposer, txComposer } = await this._createFtForFtOrderTx({
+      version: determineCodehashVersion(orderA.tokenCodeHash),
+      codehash: orderA.tokenCodeHash,
+      genesis: orderA.tokenGenesis,
+      ftUtxo: orderA.tokenUtxo,
+      sellUtxo,
+      codehashB: orderB.tokenCodeHash,
+      genesisB: orderB.tokenGenesis,
+      ftUtxoB: orderB.tokenUtxo,
+      buyerLockUtxo,
+      buyerWantTokenCodeHash: orderB.wantTokenCodeHash,
+      buyerWantTokenId: orderB.wantTokenId,
+      buyerWantAmount: orderB.wantAmount,
+      buyerAddress: new mvc.Address(orderB.lockUtxo.owner, this.network),
+      sellerAddress: new mvc.Address(orderA.lockUtxo.owner, this.network),
+      op: FT_SWAP_LOCK_OP.TRADE,
+      utxos,
+      utxoPrivateKeys,
+      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
+      middlePrivateKey: middleKey,
+      middleChangeAddress: middleAddress,
+      opreturnData,
+    })
+
+    return {
+      tx: txComposer.getTx(),
+      txHex: txComposer.getRawHex(),
+      txid: txComposer.getTxId(),
+      unlockCheckTx: unlockCheckTxComposer.getTx(),
+      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
+      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
+    }
+  }
+
+  /**
+   * 预估挂单手续费（创建 FtSwapLock + 锁定 FT）。
+   */
+  public async estimateCreateSwapOrderFee({
+    lockTokenCodeHash,
+    lockTokenGenesis,
+    lockTokenUtxo,
     opreturnData,
     utxoMaxCount = 3,
   }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
+    lockTokenCodeHash: string
+    lockTokenGenesis: string
+    lockTokenUtxo: ParamFtUtxo
     opreturnData?: any
     utxoMaxCount?: number
   }) {
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
+    checkParamGenesis(lockTokenGenesis)
+    checkParamCodehash(lockTokenCodeHash)
 
-    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
-    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
+    let ftUtxoInfo = await this._pretreatFtUtxos([lockTokenUtxo], lockTokenCodeHash, lockTokenGenesis)
+    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, lockTokenGenesis)
     const tokenUtxo = ftUtxos[0]
-        const sellLockingSize = FtSwapLockFactory.getLockingScriptSize()
+    const sellLockingSize = FtSwapLockFactory.getLockingScriptSize()
 
     // Tx1: 创建 FtSwapLock 挂单
     const stx1 = new SizeTransaction(this.feeb, this.dustCalculator)
@@ -1568,7 +1901,7 @@ export class FtManager {
     stx1.addP2PKHOutput()
     const sellTxFee = stx1.getFee()
 
-    // Tx2/Tx3: FT-A 锁定到 FtSwapLock 合约地址（1 进 1 出）
+    // Tx2/Tx3: FT 锁定到 FtSwapLock 合约地址（1 进 1 出）
     const tokenTransferType = TokenTransferCheckFactory.getOptimumType(1, 1)
     const transferFee = this._calTransferEstimateFee({
       p2pkhInputNum: 1,
@@ -1582,43 +1915,84 @@ export class FtManager {
   }
 
   /**
-   * 预估 FT-FT 买入手续费（双 FtSwapLock + 双 TokenUnlockContractCheck）。
+   * 预估下架手续费（FtSwapLock OP_REFUND，FT 退回 owner）。
    */
-  public async getBuyForFtEstimateFee({
-    codehash,
-    genesis,
-    ftUtxo,
-    sellUtxo,
-    codehashB,
-    genesisB,
-    ftUtxoB,
+  public async estimateCancelSwapOrderFee({
+    lockUtxo,
+    tokenCodeHash,
+    tokenGenesis,
+    tokenUtxo,
     opreturnData,
     utxoMaxCount = 3,
   }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellUtxo: FtForFtSellUtxo
-    codehashB: string
-    genesisB: string
-    ftUtxoB: ParamFtUtxo
+    lockUtxo: FtSwapLockUtxo
+    tokenCodeHash: string
+    tokenGenesis: string
+    tokenUtxo: ParamFtUtxo
     opreturnData?: any
     utxoMaxCount?: number
   }) {
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
-    checkParamGenesis(genesisB)
-    checkParamCodehash(codehashB)
-    if (!sellUtxo.txHex) {
-      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
+    checkParamGenesis(tokenGenesis)
+    checkParamCodehash(tokenCodeHash)
+    if (!lockUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'lockUtxo.txHex must be provided by the external layer.')
     }
-    const sellTx = new mvc.Transaction(sellUtxo.txHex)
-    const sellUtxoSatoshis = sellTx.outputs[sellUtxo.outputIndex].satoshis
+    const sellTx = new mvc.Transaction(lockUtxo.txHex)
+    const sellUtxoSatoshis = sellTx.outputs[lockUtxo.outputIndex].satoshis
 
-    let ftAInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
-    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, genesis)
-    let ftBInfo = await this._pretreatFtUtxos([ftUtxoB], codehashB, genesisB)
-    let ftBs = await this.perfectFtUtxosInfo(ftBInfo.ftUtxos, genesisB)
+    let ftAInfo = await this._pretreatFtUtxos([tokenUtxo], tokenCodeHash, tokenGenesis)
+    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, tokenGenesis)
+
+    return this._calFtForFtOrderEstimateFee({
+      tokenAUtxoSatoshis: ftAs[0].satoshis,
+      sellUtxoSatoshis,
+      op: FT_SWAP_LOCK_OP.REFUND,
+      opreturnData,
+      p2pkhInputNum: utxoMaxCount,
+    })
+  }
+
+  /**
+   * 预估撮合手续费（双 FtSwapLock + 双 TokenUnlockContractCheck）。
+   */
+  public async estimateMatchSwapFee({
+    orderA,
+    orderB,
+    opreturnData,
+    utxoMaxCount = 3,
+  }: {
+    orderA: {
+      lockUtxo: FtSwapLockUtxo
+      tokenCodeHash: string
+      tokenGenesis: string
+      tokenUtxo: ParamFtUtxo
+    }
+    orderB: {
+      lockUtxo: FtSwapLockUtxo
+      tokenCodeHash: string
+      tokenGenesis: string
+      tokenUtxo: ParamFtUtxo
+    }
+    opreturnData?: any
+    utxoMaxCount?: number
+  }) {
+    checkParamGenesis(orderA.tokenGenesis)
+    checkParamCodehash(orderA.tokenCodeHash)
+    checkParamGenesis(orderB.tokenGenesis)
+    checkParamCodehash(orderB.tokenCodeHash)
+    if (!orderA.lockUtxo.txHex || !orderB.lockUtxo.txHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'orderA.lockUtxo.txHex and orderB.lockUtxo.txHex must be provided by the external layer.'
+      )
+    }
+    const sellTx = new mvc.Transaction(orderA.lockUtxo.txHex)
+    const sellUtxoSatoshis = sellTx.outputs[orderA.lockUtxo.outputIndex].satoshis
+
+    let ftAInfo = await this._pretreatFtUtxos([orderA.tokenUtxo], orderA.tokenCodeHash, orderA.tokenGenesis)
+    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, orderA.tokenGenesis)
+    let ftBInfo = await this._pretreatFtUtxos([orderB.tokenUtxo], orderB.tokenCodeHash, orderB.tokenGenesis)
+    let ftBs = await this.perfectFtUtxosInfo(ftBInfo.ftUtxos, orderB.tokenGenesis)
 
     return this._calFtForFtOrderEstimateFee({
       tokenAUtxoSatoshis: ftAs[0].satoshis,
@@ -1630,43 +2004,6 @@ export class FtManager {
     })
   }
 
-  /**
-   * 预估 FT-FT 下架手续费（FtSwapLock OP_REFUND，FT-A 退回卖家）。
-   */
-  public async getCancelSellForFtEstimateFee({
-    codehash,
-    genesis,
-    ftUtxo,
-    sellUtxo,
-    opreturnData,
-    utxoMaxCount = 3,
-  }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellUtxo: FtForFtSellUtxo
-    opreturnData?: any
-    utxoMaxCount?: number
-  }) {
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
-    if (!sellUtxo.txHex) {
-      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
-    }
-    const sellTx = new mvc.Transaction(sellUtxo.txHex)
-    const sellUtxoSatoshis = sellTx.outputs[sellUtxo.outputIndex].satoshis
-
-    let ftAInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
-    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, genesis)
-
-    return this._calFtForFtOrderEstimateFee({
-      tokenAUtxoSatoshis: ftAs[0].satoshis,
-      sellUtxoSatoshis,
-      op: FT_SWAP_LOCK_OP.REFUND,
-      opreturnData,
-      p2pkhInputNum: utxoMaxCount,
-    })
-  }
 
   private _calFtForFtOrderEstimateFee({
     tokenAUtxoSatoshis,
@@ -1742,6 +2079,594 @@ export class FtManager {
     return stx1.getFee() + stx.getFee()
   }
 
+  private async _createFtForFtOrderTx({
+    version,
+    codehash,
+    genesis,
+    ftUtxo,
+    sellUtxo,
+    codehashB,
+    genesisB,
+    ftUtxoB,
+    buyerLockUtxo,
+    buyerPrivateKey,
+    buyerWantTokenCodeHash,
+    buyerWantTokenId,
+    buyerWantAmount,
+    sellerPrivateKey,
+    sellerAddress,
+    buyerAddress,
+    op,
+    utxos,
+    utxoPrivateKeys,
+    changeAddress,
+    middlePrivateKey,
+    middleChangeAddress,
+    opreturnData,
+  }: {
+    version: number
+    codehash: string
+    genesis: string
+    ftUtxo: ParamFtUtxo
+    sellUtxo: FtForFtSellUtxo
+    codehashB?: string
+    genesisB?: string
+    ftUtxoB?: ParamFtUtxo
+    buyerLockUtxo?: FtSwapLockUtxo
+    buyerPrivateKey?: mvc.PrivateKey
+    buyerWantTokenCodeHash?: string
+    buyerWantTokenId?: string
+    buyerWantAmount?: number
+    sellerPrivateKey?: mvc.PrivateKey
+    sellerAddress: mvc.Address
+    buyerAddress?: mvc.Address
+    op: FT_SWAP_LOCK_OP
+    utxos: Utxo[]
+    utxoPrivateKeys: mvc.PrivateKey[]
+    changeAddress: mvc.Address
+    middlePrivateKey?: mvc.PrivateKey
+    middleChangeAddress: mvc.Address
+    opreturnData?: any
+  }): Promise<{ unlockCheckTxComposer: TxComposer; txComposer: TxComposer }> {
+    // 1. 预处理 FT-A（被卖家锁定的 FT-A）
+    let ftAInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
+    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, genesis)
+    if (ftAs.length > 1) {
+      throw new CodeError(ErrCode.EC_TOO_MANY_FT_UTXOS, 'Only 1-in-1-out is supported in FT-FT operations.')
+    }
+    const ftA = ftAs[0]
+
+    if (!sellUtxo.txHex) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
+    }
+    const sellTx = new mvc.Transaction(sellUtxo.txHex)
+    const lockAUtxo = {
+      txId: sellUtxo.txId,
+      outputIndex: sellUtxo.outputIndex,
+      satoshis: sellTx.outputs[sellUtxo.outputIndex].satoshis,
+      lockingScript: sellTx.outputs[sellUtxo.outputIndex].script,
+    }
+
+    const tokenALockingScript = ftA.lockingScript
+    const tokenACodeHash = toHex(ftProto.getContractCodeHash(tokenALockingScript.toBuffer()))
+    const tokenAID = toHex(ftProto.getTokenID(tokenALockingScript.toBuffer()))
+    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_2_OUT_5
+
+    let ftB: FtUtxo
+    let lockBUtxo: any
+    let tokenBCodeHash = ''
+    let tokenBID = ''
+
+    if (op === FT_SWAP_LOCK_OP.TRADE) {
+      if (!ftUtxoB || !codehashB || !genesisB || !buyerLockUtxo || !buyerLockUtxo.txHex) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'ftUtxoB/codehashB/genesisB/buyerLockUtxo are required for FT-FT buy.')
+      }
+      let ftBInfo = await this._pretreatFtUtxos([ftUtxoB], codehashB, genesisB, buyerPrivateKey, buyerPrivateKey?.toPublicKey())
+      let ftBs = await this.perfectFtUtxosInfo(ftBInfo.ftUtxos, genesisB)
+      if (ftBs.length > 1) {
+        throw new CodeError(ErrCode.EC_TOO_MANY_FT_UTXOS, 'Only 1-in-1-out is supported in FT-FT operations.')
+      }
+      ftB = ftBs[0]
+      if (!ftB.tokenAmount.eq(new BN(sellUtxo.tokenBAmount))) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'FT-B locked amount must exactly match sellUtxo.tokenBAmount (' + sellUtxo.tokenBAmount + ').'
+        )
+      }
+      tokenBCodeHash = toHex(ftProto.getContractCodeHash(ftB.lockingScript.toBuffer()))
+      tokenBID = toHex(ftProto.getTokenID(ftB.lockingScript.toBuffer()))
+
+      // 订单匹配校验：orderA.wantToken 必须等于 orderB 实际锁定的 token
+      if (sellUtxo.tokenBCodeHash !== tokenBCodeHash || sellUtxo.tokenBID !== tokenBID) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'orderA.wantToken does not match orderB.lockToken.'
+        )
+      }
+      // orderB.wantToken 必须等于 orderA 实际锁定的 token
+      if (buyerWantTokenCodeHash !== tokenACodeHash || buyerWantTokenId !== tokenAID) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'orderB.wantToken does not match orderA.lockToken.'
+        )
+      }
+      // orderB.wantAmount 必须等于 orderA 实际锁定的 FT-A 数量
+      if (buyerWantAmount !== undefined && !ftA.tokenAmount.eq(new BN(buyerWantAmount))) {
+        throw new CodeError(
+          ErrCode.EC_INVALID_ARGUMENT,
+          'FT-A locked amount must exactly match orderB.wantAmount (' + buyerWantAmount + ').'
+        )
+      }
+
+      const buyerLockTx = new mvc.Transaction(buyerLockUtxo.txHex)
+      lockBUtxo = {
+        txId: buyerLockUtxo.txId,
+        outputIndex: buyerLockUtxo.outputIndex,
+        satoshis: buyerLockTx.outputs[buyerLockUtxo.outputIndex].satoshis,
+        lockingScript: buyerLockTx.outputs[buyerLockUtxo.outputIndex].script,
+      }
+    }
+
+    // 2. 创建 TokenUnlockContractCheck
+    const ftAReceiver = op === FT_SWAP_LOCK_OP.REFUND ? sellerAddress : buyerAddress!
+    // 布局：TRADE 时 FT-A 在输入 3；REFUND 时 FT-A 在输入 2
+    const tokenAInputIndex = op === FT_SWAP_LOCK_OP.TRADE ? 3 : 2
+    const unlockContractA = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
+    unlockContractA.setFormatedDataPart({
+      inputTokenIndexArray: [tokenAInputIndex],
+      nSender: 1,
+      tokenCodeHash: tokenACodeHash,
+      tokenID: tokenAID,
+      nReceivers: 1,
+      receiverTokenAmountArray: [ftA.tokenAmount],
+      receiverArray: [ftAReceiver],
+    })
+
+    let unlockContractB: any
+    if (op === FT_SWAP_LOCK_OP.TRADE) {
+      unlockContractB = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
+      unlockContractB.setFormatedDataPart({
+        inputTokenIndexArray: [4],
+        nSender: 1,
+        tokenCodeHash: tokenBCodeHash,
+        tokenID: tokenBID,
+        nReceivers: 1,
+        receiverTokenAmountArray: [ftB.tokenAmount],
+        receiverArray: [sellerAddress],
+      })
+    }
+
+    // 3. Tx1: 创建 amountCheck UTXO
+    const unlockCheckTxComposer = new TxComposer()
+    const unlockCheckP2pkhInputIndices = addP2PKHInputs(unlockCheckTxComposer, utxos)
+    const unlockCheckOutputIndexA = addContractOutput({
+      txComposer: unlockCheckTxComposer,
+      lockingScript: unlockContractA.lockingScript,
+      dustCalculator: this.dustCalculator,
+    })
+    let unlockCheckOutputIndexB: number | undefined
+    if (op === FT_SWAP_LOCK_OP.TRADE) {
+      unlockCheckOutputIndexB = addContractOutput({
+        txComposer: unlockCheckTxComposer,
+        lockingScript: unlockContractB.lockingScript,
+        dustCalculator: this.dustCalculator,
+      })
+    }
+    const unlockCheckChangeOutputIndex = addChangeOutput(unlockCheckTxComposer, middleChangeAddress, this.feeb)
+    unlockP2PKHInputs(unlockCheckTxComposer, unlockCheckP2pkhInputIndices, utxoPrivateKeys)
+    checkFeeRate(unlockCheckTxComposer, this.feeb)
+
+    const unlockCheckUtxoA = {
+      txId: unlockCheckTxComposer.getTxId(),
+      outputIndex: unlockCheckOutputIndexA,
+      satoshis: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexA).satoshis,
+      lockingScript: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexA).script,
+    }
+    let unlockCheckUtxoB: any
+    if (op === FT_SWAP_LOCK_OP.TRADE) {
+      unlockCheckUtxoB = {
+        txId: unlockCheckTxComposer.getTxId(),
+        outputIndex: unlockCheckOutputIndexB!,
+        satoshis: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexB!).satoshis,
+        lockingScript: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexB!).script,
+      }
+    }
+    const feeUtxo = {
+      txId: unlockCheckTxComposer.getTxId(),
+      outputIndex: unlockCheckChangeOutputIndex,
+      satoshis: unlockCheckTxComposer.getOutput(unlockCheckChangeOutputIndex).satoshis,
+      address: middleChangeAddress,
+    }
+
+    // 4. Tx2: 主交易
+    const txComposer = new TxComposer()
+    const prevouts = new Prevouts()
+
+    const lockAInputIndex = txComposer.appendInput(lockAUtxo)
+    prevouts.addVout(lockAUtxo.txId, lockAUtxo.outputIndex)
+
+    let lockBInputIndex: number
+    let ftAInputIndex: number
+    let ftBInputIndex: number
+    let unlockCheckAInputIndex: number
+    let unlockCheckBInputIndex: number
+    let feeP2pkhInputIndex: number
+
+    if (op === FT_SWAP_LOCK_OP.TRADE) {
+      lockBInputIndex = txComposer.appendInput(lockBUtxo)
+      prevouts.addVout(lockBUtxo.txId, lockBUtxo.outputIndex)
+      const p2pkhInputIndexes = addP2PKHInputs(txComposer, [feeUtxo])
+      feeP2pkhInputIndex = p2pkhInputIndexes[0]
+      prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
+      ftAInputIndex = txComposer.appendInput(ftA)
+      prevouts.addVout(ftA.txId, ftA.outputIndex)
+      ftBInputIndex = txComposer.appendInput(ftB)
+      prevouts.addVout(ftB.txId, ftB.outputIndex)
+      unlockCheckAInputIndex = txComposer.appendInput(unlockCheckUtxoA)
+      prevouts.addVout(unlockCheckUtxoA.txId, unlockCheckUtxoA.outputIndex)
+      unlockCheckBInputIndex = txComposer.appendInput(unlockCheckUtxoB)
+      prevouts.addVout(unlockCheckUtxoB.txId, unlockCheckUtxoB.outputIndex)
+
+      // 输出 0: FT-A 给买家（对齐 lockA input 0）
+      const buyerAScript = ftProto.getNewTokenScript(
+        tokenALockingScript.toBuffer(),
+        buyerAddress!.hashBuffer,
+        ftA.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(buyerAScript),
+        satoshis: ftA.satoshis,
+      })
+      // 输出 1: FT-B 给卖家（对齐 lockB input 1）
+      const sellerBScript = ftProto.getNewTokenScript(
+        ftB.lockingScript.toBuffer(),
+        sellerAddress.hashBuffer,
+        ftB.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(sellerBScript),
+        satoshis: ftB.satoshis,
+      })
+    } else {
+      lockBInputIndex = -1
+      const p2pkhInputIndexes = addP2PKHInputs(txComposer, [feeUtxo])
+      feeP2pkhInputIndex = p2pkhInputIndexes[0]
+      prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
+      ftAInputIndex = txComposer.appendInput(ftA)
+      prevouts.addVout(ftA.txId, ftA.outputIndex)
+      ftBInputIndex = -1
+      unlockCheckAInputIndex = txComposer.appendInput(unlockCheckUtxoA)
+      prevouts.addVout(unlockCheckUtxoA.txId, unlockCheckUtxoA.outputIndex)
+      unlockCheckBInputIndex = -1
+
+      // 输出 0: FT-A 退回卖家（对齐 lockA input 0）
+      const sellerAScript = ftProto.getNewTokenScript(
+        tokenALockingScript.toBuffer(),
+        sellerAddress.hashBuffer,
+        ftA.tokenAmount
+      )
+      txComposer.appendOutput({
+        lockingScript: mvc.Script.fromBuffer(sellerAScript),
+        satoshis: ftA.satoshis,
+      })
+    }
+
+    if (opreturnData) {
+      txComposer.appendOpReturnOutput(opreturnData)
+    }
+
+    // 5. 两轮签名
+    for (let c = 0; c < 2; c++) {
+      txComposer.clearChangeOutput()
+      const changeOutputIndex = txComposer.appendChangeOutput(changeAddress, this.feeb)
+
+      // 每个 amountCheck 只使用自己的 token 证明数组
+      let tokenTxHeaderArrayA = Buffer.alloc(0)
+      let tokenTxHashProofArrayA = Buffer.alloc(0)
+      let tokenSatoshiBytesArrayA = Buffer.alloc(0)
+      let tokenTxHeaderArrayB = Buffer.alloc(0)
+      let tokenTxHashProofArrayB = Buffer.alloc(0)
+      let tokenSatoshiBytesArrayB = Buffer.alloc(0)
+
+      // 5.1 解锁 FT-A（Token.unlock op=2，contractInputIndex = lockAInputIndex）
+      const lockAProof = getTxOutputProof(sellTx, lockAUtxo.outputIndex)
+      const dataPartObjA = ftProto.parseDataPart(ftA.lockingScript.toBuffer())
+      const tokenContractA = TokenFactory.createContract(
+        this.transferCheckCodeHashArray,
+        this.unlockContractCodeHashArray,
+        version
+      )
+      tokenContractA.setDataPart(toHex(ftProto.newDataPart(dataPartObjA)))
+
+      const amountCheckTxA = unlockCheckTxComposer.getTx()
+      const amountCheckATxOutputProofInfo = new TxOutputProof(
+        TokenUtil.getTxOutputProof(amountCheckTxA, unlockCheckOutputIndexA)
+      )
+      const amountCheckAScriptBuf = amountCheckTxA.outputs[unlockCheckOutputIndexA].script.toBuffer()
+
+      const prevTokenInputIndexA = ftA.prevTokenInputIndex
+      const prevTokenAddressA = new Bytes(toHex(ftA.preTokenAddress.hashBuffer))
+      const prevTokenAmountA = BigInt(ftA.preTokenAmount.toString(10))
+      const tokenTxA = new mvc.Transaction(ftA.satotxInfo.txHex)
+      const inputResA = TokenUtil.getTxInputProof(tokenTxA, prevTokenInputIndexA)
+      const tokenTxAInputProof = new TxInputProof(inputResA[0])
+      const tokenTxAHeader = inputResA[1] as Bytes
+      const prevTokenATxOutputProof = new TxOutputProof(
+        TokenUtil.getTxOutputProof(ftA.prevTokenTx, ftA.prevTokenOutputIndex)
+      )
+      const tokenAInfoHex = TokenUtil.getTxInfoHex(tokenTxA, ftA.outputIndex)
+      tokenTxHeaderArrayA = Buffer.concat([tokenTxHeaderArrayA, Buffer.from(tokenAInfoHex.txHeader, 'hex')])
+      const hashProofABuf = Buffer.from(tokenAInfoHex.txHashProof, 'hex')
+      tokenTxHashProofArrayA = Buffer.concat([
+        tokenTxHashProofArrayA,
+        TokenUtil.getUInt32Buf(hashProofABuf.length),
+        hashProofABuf,
+      ])
+      tokenSatoshiBytesArrayA = Buffer.concat([
+        tokenSatoshiBytesArrayA,
+        Buffer.from(tokenAInfoHex.txSatoshi, 'hex'),
+      ])
+
+      const unlockACall = tokenContractA.unlock({
+        txPreimage: txComposer.getInputPreimage(ftAInputIndex),
+        prevouts: new Bytes(prevouts.toHex()),
+        tokenInputIndex: 0,
+        amountCheckHashIndex: tokenUnlockType - 1,
+        amountCheckInputIndex: unlockCheckAInputIndex,
+        amountCheckTxOutputProofInfo: amountCheckATxOutputProofInfo,
+        amountCheckScript: new Bytes(amountCheckAScriptBuf.toString('hex')),
+        prevTokenInputIndex: prevTokenInputIndexA,
+        prevTokenAddress: prevTokenAddressA,
+        prevTokenAmount: prevTokenAmountA,
+        tokenTxHeader: tokenTxAHeader,
+        tokenTxInputProof: tokenTxAInputProof,
+        prevTokenTxOutputProof: prevTokenATxOutputProof,
+        senderPubKey: new PubKey(PLACE_HOLDER_PUBKEY),
+        senderSig: new Sig(PLACE_HOLDER_SIG),
+        contractInputIndex: lockAInputIndex,
+        contractTxOutputProof: new TxOutputProof(lockAProof),
+        operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
+      })
+      txComposer.getInput(ftAInputIndex).setScript(unlockACall.toScript() as mvc.Script)
+
+      // 5.2 解锁 FT-B（仅 TRADE）
+      if (op === FT_SWAP_LOCK_OP.TRADE) {
+        const lockBTx = new mvc.Transaction(buyerLockUtxo!.txHex)
+        const lockBProof = getTxOutputProof(lockBTx, lockBUtxo.outputIndex)
+        const dataPartObjB = ftProto.parseDataPart(ftB.lockingScript.toBuffer())
+        const tokenContractB = TokenFactory.createContract(
+          this.transferCheckCodeHashArray,
+          this.unlockContractCodeHashArray,
+          version
+        )
+        tokenContractB.setDataPart(toHex(ftProto.newDataPart(dataPartObjB)))
+
+        const amountCheckBTx = unlockCheckTxComposer.getTx()
+        const amountCheckBTxOutputProofInfo = new TxOutputProof(
+          TokenUtil.getTxOutputProof(amountCheckBTx, unlockCheckOutputIndexB!)
+        )
+        const amountCheckBScriptBuf = amountCheckBTx.outputs[unlockCheckOutputIndexB!].script.toBuffer()
+
+        const prevTokenInputIndexB = ftB.prevTokenInputIndex
+        const prevTokenAddressB = new Bytes(toHex(ftB.preTokenAddress.hashBuffer))
+        const prevTokenAmountB = BigInt(ftB.preTokenAmount.toString(10))
+        const tokenTxB = new mvc.Transaction(ftB.satotxInfo.txHex)
+        const inputResB = TokenUtil.getTxInputProof(tokenTxB, prevTokenInputIndexB)
+        const tokenTxBInputProof = new TxInputProof(inputResB[0])
+        const tokenTxBHeader = inputResB[1] as Bytes
+        const prevTokenBTxOutputProof = new TxOutputProof(
+          TokenUtil.getTxOutputProof(ftB.prevTokenTx, ftB.prevTokenOutputIndex)
+        )
+        const tokenBInfoHex = TokenUtil.getTxInfoHex(tokenTxB, ftB.outputIndex)
+        tokenTxHeaderArrayB = Buffer.concat([tokenTxHeaderArrayB, Buffer.from(tokenBInfoHex.txHeader, 'hex')])
+        const hashProofBBuf = Buffer.from(tokenBInfoHex.txHashProof, 'hex')
+        tokenTxHashProofArrayB = Buffer.concat([
+          tokenTxHashProofArrayB,
+          TokenUtil.getUInt32Buf(hashProofBBuf.length),
+          hashProofBBuf,
+        ])
+        tokenSatoshiBytesArrayB = Buffer.concat([
+          tokenSatoshiBytesArrayB,
+          Buffer.from(tokenBInfoHex.txSatoshi, 'hex'),
+        ])
+
+        const unlockBCall = tokenContractB.unlock({
+          txPreimage: txComposer.getInputPreimage(ftBInputIndex),
+          prevouts: new Bytes(prevouts.toHex()),
+          tokenInputIndex: 0,
+          amountCheckHashIndex: tokenUnlockType - 1,
+          amountCheckInputIndex: unlockCheckBInputIndex,
+          amountCheckTxOutputProofInfo: amountCheckBTxOutputProofInfo,
+          amountCheckScript: new Bytes(amountCheckBScriptBuf.toString('hex')),
+          prevTokenInputIndex: prevTokenInputIndexB,
+          prevTokenAddress: prevTokenAddressB,
+          prevTokenAmount: prevTokenAmountB,
+          tokenTxHeader: tokenTxBHeader,
+          tokenTxInputProof: tokenTxBInputProof,
+          prevTokenTxOutputProof: prevTokenBTxOutputProof,
+          senderPubKey: new PubKey(PLACE_HOLDER_PUBKEY),
+          senderSig: new Sig(PLACE_HOLDER_SIG),
+          contractInputIndex: lockBInputIndex,
+          contractTxOutputProof: new TxOutputProof(lockBProof),
+          operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
+        })
+        txComposer.getInput(ftBInputIndex).setScript(unlockBCall.toScript() as mvc.Script)
+      }
+
+      // 5.3 解锁 FtSwapLock_A
+      const lockAContract = FtSwapLockFactory.createContract({
+        owner: new Ripemd160(toHex(sellerAddress.hashBuffer)),
+        targetTokenCodeHash: new Bytes(tokenBCodeHash),
+        targetTokenID: new Bytes(tokenBID),
+        targetAmount: sellUtxo.tokenBAmount,
+      })
+      const lockASubScript: any = lockAUtxo.lockingScript
+      const lockAPreimage = new SigHashPreimage(
+        toHex(
+          getPreimage(
+            txComposer.getTx(),
+            lockASubScript.subScript(0),
+            lockAUtxo.satoshis,
+            lockAInputIndex,
+            Signature.SIGHASH_SINGLE | Signature.SIGHASH_FORKID
+          )
+        )
+      )
+      const unlockLockAArgs: any = {
+        txPreimage: lockAPreimage,
+        prevouts: new Bytes(prevouts.toHex()),
+        lockedTokenScript: new Bytes(tokenALockingScript.toHex()),
+        lockedTokenOutputSatoshis: ftA.satoshis,
+        op,
+      }
+      if (op === FT_SWAP_LOCK_OP.TRADE) {
+        const ftBInfoHex = TokenUtil.getTxInfoHex(new mvc.Transaction(ftB.satotxInfo.txHex), ftB.outputIndex)
+        unlockLockAArgs.targetTokenScript = new Bytes(ftB.lockingScript.toHex())
+        unlockLockAArgs.targetTxHeader = new Bytes(ftBInfoHex.txHeader)
+        unlockLockAArgs.targetTxHashProof = new Bytes(ftBInfoHex.txHashProof)
+        unlockLockAArgs.targetTxSatoshiBytes = new Bytes(ftBInfoHex.txSatoshi)
+        unlockLockAArgs.targetInputIndex = ftBInputIndex
+        unlockLockAArgs.targetTokenOutputSatoshis = ftB.satoshis
+      } else {
+        unlockLockAArgs.ownerPubKey = new PubKey(toHex(sellerPrivateKey!.publicKey.toBuffer()))
+        unlockLockAArgs.ownerSig = new Sig(
+          toHex(signTx(txComposer.getTx(), sellerPrivateKey!, lockAUtxo.lockingScript, lockAUtxo.satoshis, lockAInputIndex, sighashType))
+        )
+      }
+      txComposer.getInput(lockAInputIndex).setScript(lockAContract.unlock(unlockLockAArgs).toScript() as mvc.Script)
+
+      // 5.4 解锁 FtSwapLock_B（仅 TRADE）
+      if (op === FT_SWAP_LOCK_OP.TRADE) {
+        const lockBContract = FtSwapLockFactory.createContract({
+          owner: new Ripemd160(toHex(buyerAddress!.hashBuffer)),
+          targetTokenCodeHash: new Bytes(tokenACodeHash),
+          targetTokenID: new Bytes(tokenAID),
+          targetAmount: ftA.tokenAmount.toNumber(),
+        })
+        const lockBSubScript: any = lockBUtxo.lockingScript
+        const lockBPreimage = new SigHashPreimage(
+          toHex(
+            getPreimage(
+              txComposer.getTx(),
+              lockBSubScript.subScript(0),
+              lockBUtxo.satoshis,
+              lockBInputIndex,
+              Signature.SIGHASH_SINGLE | Signature.SIGHASH_FORKID
+            )
+          )
+        )
+        const ftAInfoHex = TokenUtil.getTxInfoHex(new mvc.Transaction(ftA.satotxInfo.txHex), ftA.outputIndex)
+        const unlockLockBCall = lockBContract.unlock({
+          txPreimage: lockBPreimage,
+          prevouts: new Bytes(prevouts.toHex()),
+          lockedTokenScript: new Bytes(ftB.lockingScript.toHex()),
+          targetTokenScript: new Bytes(tokenALockingScript.toHex()),
+          targetTxHeader: new Bytes(ftAInfoHex.txHeader),
+          targetTxHashProof: new Bytes(ftAInfoHex.txHashProof),
+          targetTxSatoshiBytes: new Bytes(ftAInfoHex.txSatoshi),
+          targetInputIndex: ftAInputIndex,
+          targetTokenOutputSatoshis: ftA.satoshis,
+          lockedTokenOutputSatoshis: ftB.satoshis,
+          op: FT_SWAP_LOCK_OP.TRADE,
+        })
+        txComposer.getInput(lockBInputIndex).setScript(unlockLockBCall.toScript() as mvc.Script)
+      }
+
+      // 5.5 解锁 amountCheck A（FT-A）
+      const ftAOutputIndex = 0
+      const ftAOutput = txComposer.getTx().outputs[ftAOutputIndex]
+      let otherOutputArrayA = Buffer.alloc(0)
+      txComposer.getTx().outputs.forEach((output, index) => {
+        if (index != ftAOutputIndex) {
+          const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
+          otherOutputArrayA = Buffer.concat([otherOutputArrayA, getUInt32Buf(outputBuf.length), outputBuf])
+        }
+      })
+      const inputTokenAddressArrayA = ftA.tokenAddress.hashBuffer
+      const inputTokenAmountArrayA = ftA.tokenAmount.toBuffer({ endian: 'little', size: 8 })
+      const tokenOutputIndexArrayA = Buffer.alloc(4)
+      tokenOutputIndexArrayA.writeUInt32LE(ftAOutputIndex, 0)
+
+      const unlockCheckSubA: any = unlockCheckUtxoA.lockingScript
+      const unlockCheckPreimageA = new SigHashPreimage(
+        toHex(
+          getPreimage(
+            txComposer.getTx(),
+            unlockCheckSubA.subScript(0),
+            unlockCheckUtxoA.satoshis,
+            unlockCheckAInputIndex
+          )
+        )
+      )
+      txComposer.getInput(unlockCheckAInputIndex).setScript(
+        unlockContractA.unlock({
+          txPreimage: unlockCheckPreimageA,
+          prevouts: new Bytes(prevouts.toHex()),
+          tokenScript: new Bytes(tokenALockingScript.toHex()),
+          tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayA.toString('hex')),
+          tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayA.toString('hex')),
+          tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayA.toString('hex')),
+          inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayA)),
+          inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayA)),
+          nOutputs: txComposer.getTx().outputs.length,
+          tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayA.toString('hex')),
+          tokenOutputSatoshis: ftAOutput.satoshis,
+          otherOutputArray: new Bytes(toHex(otherOutputArrayA)),
+        }).toScript() as mvc.Script
+      )
+
+      // 5.6 解锁 amountCheck B（FT-B，仅 TRADE）
+      if (op === FT_SWAP_LOCK_OP.TRADE) {
+        const ftBOutputIndex = 1
+        const ftBOutput = txComposer.getTx().outputs[ftBOutputIndex]
+        let otherOutputArrayB = Buffer.alloc(0)
+        txComposer.getTx().outputs.forEach((output, index) => {
+          if (index != ftBOutputIndex) {
+            const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
+            otherOutputArrayB = Buffer.concat([otherOutputArrayB, getUInt32Buf(outputBuf.length), outputBuf])
+          }
+        })
+        const inputTokenAddressArrayB = ftB.tokenAddress.hashBuffer
+        const inputTokenAmountArrayB = ftB.tokenAmount.toBuffer({ endian: 'little', size: 8 })
+        const tokenOutputIndexArrayB = Buffer.alloc(4)
+        tokenOutputIndexArrayB.writeUInt32LE(ftBOutputIndex, 0)
+
+        const unlockCheckSubB: any = unlockCheckUtxoB.lockingScript
+        const unlockCheckPreimageB = new SigHashPreimage(
+          toHex(
+            getPreimage(
+              txComposer.getTx(),
+              unlockCheckSubB.subScript(0),
+              unlockCheckUtxoB.satoshis,
+              unlockCheckBInputIndex
+            )
+          )
+        )
+        txComposer.getInput(unlockCheckBInputIndex).setScript(
+          unlockContractB.unlock({
+            txPreimage: unlockCheckPreimageB,
+            prevouts: new Bytes(prevouts.toHex()),
+            tokenScript: new Bytes(ftB.lockingScript.toHex()),
+            tokenTxHeaderArray: new Bytes(tokenTxHeaderArrayB.toString('hex')),
+            tokenTxHashProofArray: new Bytes(tokenTxHashProofArrayB.toString('hex')),
+            tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArrayB.toString('hex')),
+            inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayB)),
+            inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayB)),
+            nOutputs: txComposer.getTx().outputs.length,
+            tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayB.toString('hex')),
+            tokenOutputSatoshis: ftBOutput.satoshis,
+            otherOutputArray: new Bytes(toHex(otherOutputArrayB)),
+          }).toScript() as mvc.Script
+        )
+      }
+    }
+
+    // 6. 解锁 P2PKH 输入并检查费率
+    unlockP2PKHInputs(txComposer, [feeP2pkhInputIndex], [middlePrivateKey!])
+    checkFeeRate(txComposer, this.feeb)
+
+    return { unlockCheckTxComposer, txComposer }
+  }
   private async _createSellOrderTx({
     version,
     codehash,
@@ -2081,879 +3006,8 @@ export class FtManager {
     return { unlockCheckTxComposer, txComposer }
   }
 
-  /**
-   * 挂单卖出 FT-A，换取 FT-B（FT-FT 市场，买卖共用 FtSwapLock）。
-   * Tx1: 创建 FtSwapLock(owner=卖家, tokenA)
-   * Tx2/Tx3: 复用 transfer 把 FT-A 锁定到 FtSwapLock 地址
-   */
-  public async sellForFt({
-    codehash,
-    genesis,
-    ftUtxo,
-    sellerWif,
-    tokenBCodeHash,
-    tokenBID,
-    tokenBAmount,
-    utxos: utxosInput,
-    changeAddress,
-    middleChangeAddress,
-    middleWif,
-    opreturnData,
-  }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellerWif: string
-    tokenBCodeHash: string
-    tokenBID: string
-    tokenBAmount: number
-    utxos?: ParamUtxo[]
-    changeAddress?: string | mvc.Address
-    middleChangeAddress?: string | mvc.Address
-    middleWif?: string
-    opreturnData?: any
-  }) {
-    const startTime = Date.now()
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
 
-    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
-    const sellerPublicKey = sellerPrivateKey.toPublicKey()
-    const sellerAddress = sellerPublicKey.toAddress(this.network)
-
-    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
-    if (utxos.length > 3) {
-      throw new CodeError(
-        ErrCode.EC_UTXOS_MORE_THAN_3,
-        'MVC utxos should be no more than 3 in sellForFt operation, please merge it first.'
-      )
-    }
-
-    let ftUtxoInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis, sellerPrivateKey, sellerPublicKey)
-    let ftUtxos = await this.perfectFtUtxosInfo(ftUtxoInfo.ftUtxos, genesis)
-    const tokenUtxo = ftUtxos[0]
-    if (tokenUtxo.tokenAddress.toString() != sellerAddress.toString()) {
-      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'FT-A seller should be the FT-A owner!')
-    }
-
-    const contract = FtSwapLockFactory.createContract({
-      owner: new Ripemd160(toHex(sellerAddress.hashBuffer)),
-      targetTokenCodeHash: new Bytes(tokenBCodeHash),
-      targetTokenID: new Bytes(tokenBID),
-      targetAmount: tokenBAmount,
-    })
-
-    let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
-    if (middleChangeAddress) {
-      middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
-    } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
-    }
-
-    // Tx1: 创建 FtSwapLock 挂单输出
-    const sellTxComposer = new TxComposer()
-    const sellP2pkhInputIndexes = addP2PKHInputs(sellTxComposer, utxos)
-    addContractOutput({
-      txComposer: sellTxComposer,
-      lockingScript: contract.lockingScript,
-      dustCalculator: this.dustCalculator,
-    })
-    const sellChangeOutputIndex = addChangeOutput(sellTxComposer, middleAddress, this.feeb)
-    unlockP2PKHInputs(sellTxComposer, sellP2pkhInputIndexes, utxoPrivateKeys)
-    checkFeeRate(sellTxComposer, this.feeb)
-
-    const contractAddress = new mvc.Address(
-      TokenUtil.getScriptHashBuf(contract.lockingScript.toBuffer()),
-      this.network
-    )
-
-    // Tx2/Tx3: 把 FT-A 锁定到 FtSwapLock 合约地址
-    const transferResult = await this.transfer({
-      codehash,
-      genesis,
-      receivers: [{ address: contractAddress.toString(), amount: tokenUtxo.tokenAmount.toString() }],
-      senderWif: sellerWif,
-      ftUtxos: [ftUtxo],
-      ftChangeAddress: sellerAddress,
-      utxos: [
-        {
-          txId: sellTxComposer.getTxId(),
-          outputIndex: sellChangeOutputIndex,
-          satoshis: sellTxComposer.getOutput(sellChangeOutputIndex).satoshis,
-          address: middleAddress.toString(),
-          wif: middleKey.toString(),
-        },
-      ],
-      changeAddress: middleAddress,
-      middleChangeAddress: middleAddress,
-      middlePrivateKey: middleKey.toString(),
-      opreturnData,
-    })
-
-    const runtime = Date.now() - startTime
-    return {
-      sellTx: sellTxComposer.getTx(),
-      sellTxHex: sellTxComposer.getRawHex(),
-      sellTxId: sellTxComposer.getTxId(),
-      ...transferResult,
-      runtime,
-    }
-  }
-
-  /**
-   * 下架 FT-FT 挂单：FtSwapLock OP_REFUND，FT-A 退回卖家。
-   */
-  public async cancelSellForFt({
-    codehash,
-    genesis,
-    ftUtxo,
-    sellUtxo,
-    sellerWif,
-    utxos: utxosInput,
-    changeAddress,
-    middleChangeAddress,
-    middleWif,
-    opreturnData,
-  }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellUtxo: FtForFtSellUtxo
-    sellerWif: string
-    utxos?: ParamUtxo[]
-    changeAddress?: string | mvc.Address
-    middleChangeAddress?: string | mvc.Address
-    middleWif?: string
-    opreturnData?: any
-  }) {
-    const startTime = Date.now()
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
-
-    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
-    const sellerAddress = sellerPrivateKey.toAddress(this.network)
-
-    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
-    if (utxos.length > 3) {
-      throw new CodeError(
-        ErrCode.EC_UTXOS_MORE_THAN_3,
-        'MVC utxos should be no more than 3 in cancelSellForFt operation, please merge it first.'
-      )
-    }
-
-    let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
-    if (middleChangeAddress) {
-      middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
-    } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
-    }
-
-    const { unlockCheckTxComposer, txComposer } = await this._createFtForFtOrderTx({
-      version: determineCodehashVersion(codehash),
-      codehash,
-      genesis,
-      ftUtxo,
-      sellUtxo,
-      sellerPrivateKey,
-      sellerAddress,
-      op: FT_SWAP_LOCK_OP.REFUND,
-      utxos,
-      utxoPrivateKeys,
-      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
-      middlePrivateKey: middleKey,
-      middleChangeAddress: middleAddress,
-      opreturnData,
-    })
-
-    const runtime = Date.now() - startTime
-    return {
-      tx: txComposer.getTx(),
-      txHex: txComposer.getRawHex(),
-      txid: txComposer.getTxId(),
-      unlockCheckTx: unlockCheckTxComposer.getTx(),
-      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
-      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
-      runtime,
-    }
-  }
-
-  /**
-   * 买家买入：双 FtSwapLock + 双 TokenUnlockContractCheck 原子互换。
-   * 输入布局：
-   *   0 = FtSwapLock_A（卖家锁 FT-A）
-   *   1 = FtSwapLock_B（买家锁 FT-B）
-   *   2 = SPACE 手续费
-   *   3 = FT-A UTXO
-   *   4 = FT-B UTXO
-   *   5 = TokenUnlockContractCheck_A
-   *   6 = TokenUnlockContractCheck_B
-   * 输出：
-   *   0 = FT-A 给买家（对齐 FtSwapLock_A）
-   *   1 = FT-B 给卖家（对齐 FtSwapLock_B）
-   *   2 = SPACE 找零
-   */
-  public async buyForFt({
-    codehash,
-    genesis,
-    ftUtxo,
-    sellUtxo,
-    codehashB,
-    genesisB,
-    ftUtxoB,
-    buyerLockUtxo,
-    buyerWif,
-    buyerAddress,
-    utxos: utxosInput,
-    changeAddress,
-    middleChangeAddress,
-    middleWif,
-    opreturnData,
-  }: {
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellUtxo: FtForFtSellUtxo
-    codehashB: string
-    genesisB: string
-    ftUtxoB: ParamFtUtxo
-    buyerLockUtxo: FtSwapLockUtxo
-    buyerWif?: string
-    buyerAddress?: string | mvc.Address
-    utxos?: ParamUtxo[]
-    changeAddress?: string | mvc.Address
-    middleChangeAddress?: string | mvc.Address
-    middleWif?: string
-    opreturnData?: any
-  }) {
-    const startTime = Date.now()
-    checkParamGenesis(genesis)
-    checkParamCodehash(codehash)
-    checkParamGenesis(genesisB)
-    checkParamCodehash(codehashB)
-
-    let buyerAddr: mvc.Address
-    if (buyerAddress) {
-      buyerAddr = new mvc.Address(buyerAddress, this.network)
-    } else {
-      buyerAddr = new mvc.PrivateKey(buyerWif).toAddress(this.network)
-    }
-
-    const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
-    if (utxos.length > 3) {
-      throw new CodeError(
-        ErrCode.EC_UTXOS_MORE_THAN_3,
-        'MVC utxos should be no more than 3 in buyForFt operation, please merge it first.'
-      )
-    }
-
-    let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
-    if (middleChangeAddress) {
-      middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
-    } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
-    }
-
-    const buyerPrivateKey = buyerWif ? new mvc.PrivateKey(buyerWif) : undefined
-
-    const { unlockCheckTxComposer, txComposer } = await this._createFtForFtOrderTx({
-      version: determineCodehashVersion(codehash),
-      codehash,
-      genesis,
-      ftUtxo,
-      sellUtxo,
-      codehashB,
-      genesisB,
-      ftUtxoB,
-      buyerLockUtxo,
-      buyerPrivateKey,
-      buyerAddress: buyerAddr,
-      sellerAddress: new mvc.Address(sellUtxo.sellerAddress, this.network),
-      op: FT_SWAP_LOCK_OP.TRADE,
-      utxos,
-      utxoPrivateKeys,
-      changeAddress: changeAddress ? new mvc.Address(changeAddress, this.network) : (utxos[0].address as mvc.Address),
-      middlePrivateKey: middleKey,
-      middleChangeAddress: middleAddress,
-      opreturnData,
-    })
-
-    const runtime = Date.now() - startTime
-    return {
-      tx: txComposer.getTx(),
-      txHex: txComposer.getRawHex(),
-      txid: txComposer.getTxId(),
-      unlockCheckTx: unlockCheckTxComposer.getTx(),
-      unlockCheckTxHex: unlockCheckTxComposer.getRawHex(),
-      unlockCheckTxId: unlockCheckTxComposer.getTxId(),
-      runtime,
-    }
-  }
-
-  private async _createFtForFtOrderTx({
-    version,
-    codehash,
-    genesis,
-    ftUtxo,
-    sellUtxo,
-    codehashB,
-    genesisB,
-    ftUtxoB,
-    buyerLockUtxo,
-    buyerPrivateKey,
-    sellerPrivateKey,
-    sellerAddress,
-    buyerAddress,
-    op,
-    utxos,
-    utxoPrivateKeys,
-    changeAddress,
-    middlePrivateKey,
-    middleChangeAddress,
-    opreturnData,
-  }: {
-    version: number
-    codehash: string
-    genesis: string
-    ftUtxo: ParamFtUtxo
-    sellUtxo: FtForFtSellUtxo
-    codehashB?: string
-    genesisB?: string
-    ftUtxoB?: ParamFtUtxo
-    buyerLockUtxo?: FtSwapLockUtxo
-    buyerPrivateKey?: mvc.PrivateKey
-    sellerPrivateKey?: mvc.PrivateKey
-    sellerAddress: mvc.Address
-    buyerAddress?: mvc.Address
-    op: FT_SWAP_LOCK_OP
-    utxos: Utxo[]
-    utxoPrivateKeys: mvc.PrivateKey[]
-    changeAddress: mvc.Address
-    middlePrivateKey?: mvc.PrivateKey
-    middleChangeAddress: mvc.Address
-    opreturnData?: any
-  }): Promise<{ unlockCheckTxComposer: TxComposer; txComposer: TxComposer }> {
-    // 1. 预处理 FT-A（被卖家锁定的 FT-A）
-    let ftAInfo = await this._pretreatFtUtxos([ftUtxo], codehash, genesis)
-    let ftAs = await this.perfectFtUtxosInfo(ftAInfo.ftUtxos, genesis)
-    if (ftAs.length > 1) {
-      throw new CodeError(ErrCode.EC_TOO_MANY_FT_UTXOS, 'Only 1-in-1-out is supported in FT-FT operations.')
-    }
-    const ftA = ftAs[0]
-
-    if (!sellUtxo.txHex) {
-      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'sellUtxo.txHex must be provided by the external layer.')
-    }
-    const sellTx = new mvc.Transaction(sellUtxo.txHex)
-    const lockAUtxo = {
-      txId: sellUtxo.txId,
-      outputIndex: sellUtxo.outputIndex,
-      satoshis: sellTx.outputs[sellUtxo.outputIndex].satoshis,
-      lockingScript: sellTx.outputs[sellUtxo.outputIndex].script,
-    }
-
-    const tokenALockingScript = ftA.lockingScript
-    const tokenACodeHash = toHex(ftProto.getContractCodeHash(tokenALockingScript.toBuffer()))
-    const tokenAID = toHex(ftProto.getTokenID(tokenALockingScript.toBuffer()))
-    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_2_OUT_5
-
-    let ftB: FtUtxo
-    let lockBUtxo: any
-    let tokenBCodeHash = ''
-    let tokenBID = ''
-
-    if (op === FT_SWAP_LOCK_OP.TRADE) {
-      if (!ftUtxoB || !codehashB || !genesisB || !buyerLockUtxo || !buyerLockUtxo.txHex) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'ftUtxoB/codehashB/genesisB/buyerLockUtxo are required for FT-FT buy.')
-      }
-      let ftBInfo = await this._pretreatFtUtxos([ftUtxoB], codehashB, genesisB, buyerPrivateKey, buyerPrivateKey?.toPublicKey())
-      let ftBs = await this.perfectFtUtxosInfo(ftBInfo.ftUtxos, genesisB)
-      if (ftBs.length > 1) {
-        throw new CodeError(ErrCode.EC_TOO_MANY_FT_UTXOS, 'Only 1-in-1-out is supported in FT-FT operations.')
-      }
-      ftB = ftBs[0]
-      if (!ftB.tokenAmount.eq(new BN(sellUtxo.tokenBAmount))) {
-        throw new CodeError(
-          ErrCode.EC_INVALID_ARGUMENT,
-          'FT-B locked amount must exactly match sellUtxo.tokenBAmount (' + sellUtxo.tokenBAmount + ').'
-        )
-      }
-      tokenBCodeHash = toHex(ftProto.getContractCodeHash(ftB.lockingScript.toBuffer()))
-      tokenBID = toHex(ftProto.getTokenID(ftB.lockingScript.toBuffer()))
-
-      const buyerLockTx = new mvc.Transaction(buyerLockUtxo.txHex)
-      lockBUtxo = {
-        txId: buyerLockUtxo.txId,
-        outputIndex: buyerLockUtxo.outputIndex,
-        satoshis: buyerLockTx.outputs[buyerLockUtxo.outputIndex].satoshis,
-        lockingScript: buyerLockTx.outputs[buyerLockUtxo.outputIndex].script,
-      }
-    }
-
-    // 2. 创建 TokenUnlockContractCheck
-    const ftAReceiver = op === FT_SWAP_LOCK_OP.REFUND ? sellerAddress : buyerAddress!
-    // 布局：TRADE 时 FT-A 在输入 3；REFUND 时 FT-A 在输入 2
-    const tokenAInputIndex = op === FT_SWAP_LOCK_OP.TRADE ? 3 : 2
-    const unlockContractA = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
-    unlockContractA.setFormatedDataPart({
-      inputTokenIndexArray: [tokenAInputIndex],
-      nSender: 1,
-      tokenCodeHash: tokenACodeHash,
-      tokenID: tokenAID,
-      nReceivers: 1,
-      receiverTokenAmountArray: [ftA.tokenAmount],
-      receiverArray: [ftAReceiver],
-    })
-
-    let unlockContractB: any
-    if (op === FT_SWAP_LOCK_OP.TRADE) {
-      unlockContractB = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
-      unlockContractB.setFormatedDataPart({
-        inputTokenIndexArray: [4],
-        nSender: 1,
-        tokenCodeHash: tokenBCodeHash,
-        tokenID: tokenBID,
-        nReceivers: 1,
-        receiverTokenAmountArray: [ftB.tokenAmount],
-        receiverArray: [sellerAddress],
-      })
-    }
-
-    // 3. Tx1: 创建 amountCheck UTXO
-    const unlockCheckTxComposer = new TxComposer()
-    const unlockCheckP2pkhInputIndices = addP2PKHInputs(unlockCheckTxComposer, utxos)
-    const unlockCheckOutputIndexA = addContractOutput({
-      txComposer: unlockCheckTxComposer,
-      lockingScript: unlockContractA.lockingScript,
-      dustCalculator: this.dustCalculator,
-    })
-    let unlockCheckOutputIndexB: number | undefined
-    if (op === FT_SWAP_LOCK_OP.TRADE) {
-      unlockCheckOutputIndexB = addContractOutput({
-        txComposer: unlockCheckTxComposer,
-        lockingScript: unlockContractB.lockingScript,
-        dustCalculator: this.dustCalculator,
-      })
-    }
-    const unlockCheckChangeOutputIndex = addChangeOutput(unlockCheckTxComposer, middleChangeAddress, this.feeb)
-    unlockP2PKHInputs(unlockCheckTxComposer, unlockCheckP2pkhInputIndices, utxoPrivateKeys)
-    checkFeeRate(unlockCheckTxComposer, this.feeb)
-
-    const unlockCheckUtxoA = {
-      txId: unlockCheckTxComposer.getTxId(),
-      outputIndex: unlockCheckOutputIndexA,
-      satoshis: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexA).satoshis,
-      lockingScript: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexA).script,
-    }
-    let unlockCheckUtxoB: any
-    if (op === FT_SWAP_LOCK_OP.TRADE) {
-      unlockCheckUtxoB = {
-        txId: unlockCheckTxComposer.getTxId(),
-        outputIndex: unlockCheckOutputIndexB!,
-        satoshis: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexB!).satoshis,
-        lockingScript: unlockCheckTxComposer.getOutput(unlockCheckOutputIndexB!).script,
-      }
-    }
-    const feeUtxo = {
-      txId: unlockCheckTxComposer.getTxId(),
-      outputIndex: unlockCheckChangeOutputIndex,
-      satoshis: unlockCheckTxComposer.getOutput(unlockCheckChangeOutputIndex).satoshis,
-      address: middleChangeAddress,
-    }
-
-    // 4. Tx2: 主交易
-    const txComposer = new TxComposer()
-    const prevouts = new Prevouts()
-
-    const lockAInputIndex = txComposer.appendInput(lockAUtxo)
-    prevouts.addVout(lockAUtxo.txId, lockAUtxo.outputIndex)
-
-    let lockBInputIndex: number
-    let ftAInputIndex: number
-    let ftBInputIndex: number
-    let unlockCheckAInputIndex: number
-    let unlockCheckBInputIndex: number
-
-    if (op === FT_SWAP_LOCK_OP.TRADE) {
-      lockBInputIndex = txComposer.appendInput(lockBUtxo)
-      prevouts.addVout(lockBUtxo.txId, lockBUtxo.outputIndex)
-      const p2pkhInputIndexes = addP2PKHInputs(txComposer, [feeUtxo])
-      prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
-      ftAInputIndex = txComposer.appendInput(ftA)
-      prevouts.addVout(ftA.txId, ftA.outputIndex)
-      ftBInputIndex = txComposer.appendInput(ftB)
-      prevouts.addVout(ftB.txId, ftB.outputIndex)
-      unlockCheckAInputIndex = txComposer.appendInput(unlockCheckUtxoA)
-      prevouts.addVout(unlockCheckUtxoA.txId, unlockCheckUtxoA.outputIndex)
-      unlockCheckBInputIndex = txComposer.appendInput(unlockCheckUtxoB)
-      prevouts.addVout(unlockCheckUtxoB.txId, unlockCheckUtxoB.outputIndex)
-
-      // 输出 0: FT-A 给买家（对齐 lockA input 0）
-      const buyerAScript = ftProto.getNewTokenScript(
-        tokenALockingScript.toBuffer(),
-        buyerAddress!.hashBuffer,
-        ftA.tokenAmount
-      )
-      txComposer.appendOutput({
-        lockingScript: mvc.Script.fromBuffer(buyerAScript),
-        satoshis: ftA.satoshis,
-      })
-      // 输出 1: FT-B 给卖家（对齐 lockB input 1）
-      const sellerBScript = ftProto.getNewTokenScript(
-        ftB.lockingScript.toBuffer(),
-        sellerAddress.hashBuffer,
-        ftB.tokenAmount
-      )
-      txComposer.appendOutput({
-        lockingScript: mvc.Script.fromBuffer(sellerBScript),
-        satoshis: ftB.satoshis,
-      })
-    } else {
-      lockBInputIndex = -1
-      const p2pkhInputIndexes = addP2PKHInputs(txComposer, [feeUtxo])
-      prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
-      ftAInputIndex = txComposer.appendInput(ftA)
-      prevouts.addVout(ftA.txId, ftA.outputIndex)
-      ftBInputIndex = -1
-      unlockCheckAInputIndex = txComposer.appendInput(unlockCheckUtxoA)
-      prevouts.addVout(unlockCheckUtxoA.txId, unlockCheckUtxoA.outputIndex)
-      unlockCheckBInputIndex = -1
-
-      // 输出 0: FT-A 退回卖家（对齐 lockA input 0）
-      const sellerAScript = ftProto.getNewTokenScript(
-        tokenALockingScript.toBuffer(),
-        sellerAddress.hashBuffer,
-        ftA.tokenAmount
-      )
-      txComposer.appendOutput({
-        lockingScript: mvc.Script.fromBuffer(sellerAScript),
-        satoshis: ftA.satoshis,
-      })
-    }
-
-    if (opreturnData) {
-      txComposer.appendOpReturnOutput(opreturnData)
-    }
-
-    // 5. 两轮签名
-    let tokenTxHeaderArray = Buffer.alloc(0)
-    let tokenTxHashProofArray = Buffer.alloc(0)
-    let tokenSatoshiBytesArray = Buffer.alloc(0)
-
-    for (let c = 0; c < 2; c++) {
-      txComposer.clearChangeOutput()
-      const changeOutputIndex = txComposer.appendChangeOutput(changeAddress, this.feeb)
-
-      // 5.1 解锁 FT-A（Token.unlock op=2，contractInputIndex = lockAInputIndex）
-      const lockAProof = getTxOutputProof(sellTx, lockAUtxo.outputIndex)
-      const dataPartObjA = ftProto.parseDataPart(ftA.lockingScript.toBuffer())
-      const tokenContractA = TokenFactory.createContract(
-        this.transferCheckCodeHashArray,
-        this.unlockContractCodeHashArray,
-        version
-      )
-      tokenContractA.setDataPart(toHex(ftProto.newDataPart(dataPartObjA)))
-
-      const amountCheckTxA = unlockCheckTxComposer.getTx()
-      const amountCheckATxOutputProofInfo = new TxOutputProof(
-        TokenUtil.getTxOutputProof(amountCheckTxA, unlockCheckOutputIndexA)
-      )
-      const amountCheckAScriptBuf = amountCheckTxA.outputs[unlockCheckOutputIndexA].script.toBuffer()
-
-      const prevTokenInputIndexA = ftA.prevTokenInputIndex
-      const prevTokenAddressA = new Bytes(toHex(ftA.preTokenAddress.hashBuffer))
-      const prevTokenAmountA = BigInt(ftA.preTokenAmount.toString(10))
-      const tokenTxA = new mvc.Transaction(ftA.satotxInfo.txHex)
-      const inputResA = TokenUtil.getTxInputProof(tokenTxA, prevTokenInputIndexA)
-      const tokenTxAInputProof = new TxInputProof(inputResA[0])
-      const tokenTxAHeader = inputResA[1] as Bytes
-      const prevTokenATxOutputProof = new TxOutputProof(
-        TokenUtil.getTxOutputProof(ftA.prevTokenTx, ftA.prevTokenOutputIndex)
-      )
-      const tokenAInfoHex = TokenUtil.getTxInfoHex(tokenTxA, ftA.outputIndex)
-      tokenTxHeaderArray = Buffer.concat([tokenTxHeaderArray, Buffer.from(tokenAInfoHex.txHeader, 'hex')])
-      const hashProofABuf = Buffer.from(tokenAInfoHex.txHashProof, 'hex')
-      tokenTxHashProofArray = Buffer.concat([
-        tokenTxHashProofArray,
-        TokenUtil.getUInt32Buf(hashProofABuf.length),
-        hashProofABuf,
-      ])
-      tokenSatoshiBytesArray = Buffer.concat([
-        tokenSatoshiBytesArray,
-        Buffer.from(tokenAInfoHex.txSatoshi, 'hex'),
-      ])
-
-      const unlockACall = tokenContractA.unlock({
-        txPreimage: txComposer.getInputPreimage(ftAInputIndex),
-        prevouts: new Bytes(prevouts.toHex()),
-        tokenInputIndex: 0,
-        amountCheckHashIndex: tokenUnlockType - 1,
-        amountCheckInputIndex: unlockCheckAInputIndex,
-        amountCheckTxOutputProofInfo: amountCheckATxOutputProofInfo,
-        amountCheckScript: new Bytes(amountCheckAScriptBuf.toString('hex')),
-        prevTokenInputIndex: prevTokenInputIndexA,
-        prevTokenAddress: prevTokenAddressA,
-        prevTokenAmount: prevTokenAmountA,
-        tokenTxHeader: tokenTxAHeader,
-        tokenTxInputProof: tokenTxAInputProof,
-        prevTokenTxOutputProof: prevTokenATxOutputProof,
-        senderPubKey: new PubKey(PLACE_HOLDER_PUBKEY),
-        senderSig: new Sig(PLACE_HOLDER_SIG),
-        contractInputIndex: lockAInputIndex,
-        contractTxOutputProof: new TxOutputProof(lockAProof),
-        operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
-      })
-      txComposer.getInput(ftAInputIndex).setScript(unlockACall.toScript() as mvc.Script)
-
-      // 5.2 解锁 FT-B（仅 TRADE）
-      if (op === FT_SWAP_LOCK_OP.TRADE) {
-        const lockBTx = new mvc.Transaction(buyerLockUtxo!.txHex)
-        const lockBProof = getTxOutputProof(lockBTx, lockBUtxo.outputIndex)
-        const dataPartObjB = ftProto.parseDataPart(ftB.lockingScript.toBuffer())
-        const tokenContractB = TokenFactory.createContract(
-          this.transferCheckCodeHashArray,
-          this.unlockContractCodeHashArray,
-          version
-        )
-        tokenContractB.setDataPart(toHex(ftProto.newDataPart(dataPartObjB)))
-
-        const amountCheckBTx = unlockCheckTxComposer.getTx()
-        const amountCheckBTxOutputProofInfo = new TxOutputProof(
-          TokenUtil.getTxOutputProof(amountCheckBTx, unlockCheckOutputIndexB!)
-        )
-        const amountCheckBScriptBuf = amountCheckBTx.outputs[unlockCheckOutputIndexB!].script.toBuffer()
-
-        const prevTokenInputIndexB = ftB.prevTokenInputIndex
-        const prevTokenAddressB = new Bytes(toHex(ftB.preTokenAddress.hashBuffer))
-        const prevTokenAmountB = BigInt(ftB.preTokenAmount.toString(10))
-        const tokenTxB = new mvc.Transaction(ftB.satotxInfo.txHex)
-        const inputResB = TokenUtil.getTxInputProof(tokenTxB, prevTokenInputIndexB)
-        const tokenTxBInputProof = new TxInputProof(inputResB[0])
-        const tokenTxBHeader = inputResB[1] as Bytes
-        const prevTokenBTxOutputProof = new TxOutputProof(
-          TokenUtil.getTxOutputProof(ftB.prevTokenTx, ftB.prevTokenOutputIndex)
-        )
-        const tokenBInfoHex = TokenUtil.getTxInfoHex(tokenTxB, ftB.outputIndex)
-        tokenTxHeaderArray = Buffer.concat([tokenTxHeaderArray, Buffer.from(tokenBInfoHex.txHeader, 'hex')])
-        const hashProofBBuf = Buffer.from(tokenBInfoHex.txHashProof, 'hex')
-        tokenTxHashProofArray = Buffer.concat([
-          tokenTxHashProofArray,
-          TokenUtil.getUInt32Buf(hashProofBBuf.length),
-          hashProofBBuf,
-        ])
-        tokenSatoshiBytesArray = Buffer.concat([
-          tokenSatoshiBytesArray,
-          Buffer.from(tokenBInfoHex.txSatoshi, 'hex'),
-        ])
-
-        const unlockBCall = tokenContractB.unlock({
-          txPreimage: txComposer.getInputPreimage(ftBInputIndex),
-          prevouts: new Bytes(prevouts.toHex()),
-          tokenInputIndex: 0,
-          amountCheckHashIndex: tokenUnlockType - 1,
-          amountCheckInputIndex: unlockCheckBInputIndex,
-          amountCheckTxOutputProofInfo: amountCheckBTxOutputProofInfo,
-          amountCheckScript: new Bytes(amountCheckBScriptBuf.toString('hex')),
-          prevTokenInputIndex: prevTokenInputIndexB,
-          prevTokenAddress: prevTokenAddressB,
-          prevTokenAmount: prevTokenAmountB,
-          tokenTxHeader: tokenTxBHeader,
-          tokenTxInputProof: tokenTxBInputProof,
-          prevTokenTxOutputProof: prevTokenBTxOutputProof,
-          senderPubKey: new PubKey(PLACE_HOLDER_PUBKEY),
-          senderSig: new Sig(PLACE_HOLDER_SIG),
-          contractInputIndex: lockBInputIndex,
-          contractTxOutputProof: new TxOutputProof(lockBProof),
-          operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
-        })
-        txComposer.getInput(ftBInputIndex).setScript(unlockBCall.toScript() as mvc.Script)
-      }
-
-      // 5.3 解锁 FtSwapLock_A
-      const lockAContract = FtSwapLockFactory.createContract({
-        owner: new Ripemd160(toHex(sellerAddress.hashBuffer)),
-        targetTokenCodeHash: new Bytes(tokenBCodeHash),
-        targetTokenID: new Bytes(tokenBID),
-        targetAmount: sellUtxo.tokenBAmount,
-      })
-      const lockASubScript: any = lockAUtxo.lockingScript
-      const lockAPreimage = new SigHashPreimage(
-        toHex(
-          getPreimage(
-            txComposer.getTx(),
-            lockASubScript.subScript(0),
-            lockAUtxo.satoshis,
-            lockAInputIndex,
-            Signature.SIGHASH_SINGLE | Signature.SIGHASH_FORKID
-          )
-        )
-      )
-      const unlockLockAArgs: any = {
-        txPreimage: lockAPreimage,
-        prevouts: new Bytes(prevouts.toHex()),
-        lockedTokenScript: new Bytes(tokenALockingScript.toHex()),
-        lockedTokenOutputSatoshis: ftA.satoshis,
-        op,
-      }
-      if (op === FT_SWAP_LOCK_OP.TRADE) {
-        const ftBInfoHex = TokenUtil.getTxInfoHex(new mvc.Transaction(ftB.satotxInfo.txHex), ftB.outputIndex)
-        unlockLockAArgs.targetTokenScript = new Bytes(ftB.lockingScript.toHex())
-        unlockLockAArgs.targetTxHeader = new Bytes(ftBInfoHex.txHeader)
-        unlockLockAArgs.targetTxHashProof = new Bytes(ftBInfoHex.txHashProof)
-        unlockLockAArgs.targetTxSatoshiBytes = new Bytes(ftBInfoHex.txSatoshi)
-        unlockLockAArgs.targetInputIndex = ftBInputIndex
-        unlockLockAArgs.targetTokenOutputSatoshis = ftB.satoshis
-      } else {
-        unlockLockAArgs.ownerPubKey = new PubKey(toHex(sellerPrivateKey!.publicKey.toBuffer()))
-        unlockLockAArgs.ownerSig = new Sig(
-          toHex(signTx(txComposer.getTx(), sellerPrivateKey!, lockAUtxo.lockingScript, lockAUtxo.satoshis, lockAInputIndex, sighashType))
-        )
-      }
-      txComposer.getInput(lockAInputIndex).setScript(lockAContract.unlock(unlockLockAArgs).toScript() as mvc.Script)
-
-      // 5.4 解锁 FtSwapLock_B（仅 TRADE）
-      if (op === FT_SWAP_LOCK_OP.TRADE) {
-        const lockBContract = FtSwapLockFactory.createContract({
-          owner: new Ripemd160(toHex(buyerAddress!.hashBuffer)),
-          targetTokenCodeHash: new Bytes(tokenACodeHash),
-          targetTokenID: new Bytes(tokenAID),
-          targetAmount: ftA.tokenAmount.toNumber(),
-        })
-        const lockBSubScript: any = lockBUtxo.lockingScript
-        const lockBPreimage = new SigHashPreimage(
-          toHex(
-            getPreimage(
-              txComposer.getTx(),
-              lockBSubScript.subScript(0),
-              lockBUtxo.satoshis,
-              lockBInputIndex,
-              Signature.SIGHASH_SINGLE | Signature.SIGHASH_FORKID
-            )
-          )
-        )
-        const ftAInfoHex = TokenUtil.getTxInfoHex(new mvc.Transaction(ftA.satotxInfo.txHex), ftA.outputIndex)
-        const unlockLockBCall = lockBContract.unlock({
-          txPreimage: lockBPreimage,
-          prevouts: new Bytes(prevouts.toHex()),
-          lockedTokenScript: new Bytes(ftB.lockingScript.toHex()),
-          targetTokenScript: new Bytes(tokenALockingScript.toHex()),
-          targetTxHeader: new Bytes(ftAInfoHex.txHeader),
-          targetTxHashProof: new Bytes(ftAInfoHex.txHashProof),
-          targetTxSatoshiBytes: new Bytes(ftAInfoHex.txSatoshi),
-          targetInputIndex: ftAInputIndex,
-          targetTokenOutputSatoshis: ftA.satoshis,
-          lockedTokenOutputSatoshis: ftB.satoshis,
-          op: FT_SWAP_LOCK_OP.TRADE,
-        })
-        txComposer.getInput(lockBInputIndex).setScript(unlockLockBCall.toScript() as mvc.Script)
-      }
-
-      // 5.5 解锁 amountCheck A（FT-A）
-      const ftAOutputIndex = 0
-      const ftAOutput = txComposer.getTx().outputs[ftAOutputIndex]
-      let otherOutputArrayA = Buffer.alloc(0)
-      txComposer.getTx().outputs.forEach((output, index) => {
-        if (index != ftAOutputIndex) {
-          const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
-          otherOutputArrayA = Buffer.concat([otherOutputArrayA, getUInt32Buf(outputBuf.length), outputBuf])
-        }
-      })
-      const inputTokenAddressArrayA = ftA.tokenAddress.hashBuffer
-      const inputTokenAmountArrayA = ftA.tokenAmount.toBuffer({ endian: 'little', size: 8 })
-      const tokenOutputIndexArrayA = Buffer.alloc(4)
-      tokenOutputIndexArrayA.writeUInt32LE(ftAOutputIndex, 0)
-
-      const unlockCheckSubA: any = unlockCheckUtxoA.lockingScript
-      const unlockCheckPreimageA = new SigHashPreimage(
-        toHex(
-          getPreimage(
-            txComposer.getTx(),
-            unlockCheckSubA.subScript(0),
-            unlockCheckUtxoA.satoshis,
-            unlockCheckAInputIndex
-          )
-        )
-      )
-      txComposer.getInput(unlockCheckAInputIndex).setScript(
-        unlockContractA.unlock({
-          txPreimage: unlockCheckPreimageA,
-          prevouts: new Bytes(prevouts.toHex()),
-          tokenScript: new Bytes(tokenALockingScript.toHex()),
-          tokenTxHeaderArray: new Bytes(tokenTxHeaderArray.toString('hex')),
-          tokenTxHashProofArray: new Bytes(tokenTxHashProofArray.toString('hex')),
-          tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArray.toString('hex')),
-          inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayA)),
-          inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayA)),
-          nOutputs: txComposer.getTx().outputs.length,
-          tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayA.toString('hex')),
-          tokenOutputSatoshis: ftAOutput.satoshis,
-          otherOutputArray: new Bytes(toHex(otherOutputArrayA)),
-        }).toScript() as mvc.Script
-      )
-
-      // 5.6 解锁 amountCheck B（FT-B，仅 TRADE）
-      if (op === FT_SWAP_LOCK_OP.TRADE) {
-        const ftBOutputIndex = 1
-        const ftBOutput = txComposer.getTx().outputs[ftBOutputIndex]
-        let otherOutputArrayB = Buffer.alloc(0)
-        txComposer.getTx().outputs.forEach((output, index) => {
-          if (index != ftBOutputIndex) {
-            const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
-            otherOutputArrayB = Buffer.concat([otherOutputArrayB, getUInt32Buf(outputBuf.length), outputBuf])
-          }
-        })
-        const inputTokenAddressArrayB = ftB.tokenAddress.hashBuffer
-        const inputTokenAmountArrayB = ftB.tokenAmount.toBuffer({ endian: 'little', size: 8 })
-        const tokenOutputIndexArrayB = Buffer.alloc(4)
-        tokenOutputIndexArrayB.writeUInt32LE(ftBOutputIndex, 0)
-
-        const unlockCheckSubB: any = unlockCheckUtxoB.lockingScript
-        const unlockCheckPreimageB = new SigHashPreimage(
-          toHex(
-            getPreimage(
-              txComposer.getTx(),
-              unlockCheckSubB.subScript(0),
-              unlockCheckUtxoB.satoshis,
-              unlockCheckBInputIndex
-            )
-          )
-        )
-        txComposer.getInput(unlockCheckBInputIndex).setScript(
-          unlockContractB.unlock({
-            txPreimage: unlockCheckPreimageB,
-            prevouts: new Bytes(prevouts.toHex()),
-            tokenScript: new Bytes(ftB.lockingScript.toHex()),
-            tokenTxHeaderArray: new Bytes(tokenTxHeaderArray.toString('hex')),
-            tokenTxHashProofArray: new Bytes(tokenTxHashProofArray.toString('hex')),
-            tokenSatoshiBytesArray: new Bytes(tokenSatoshiBytesArray.toString('hex')),
-            inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArrayB)),
-            inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArrayB)),
-            nOutputs: txComposer.getTx().outputs.length,
-            tokenOutputIndexArray: new Bytes(tokenOutputIndexArrayB.toString('hex')),
-            tokenOutputSatoshis: ftBOutput.satoshis,
-            otherOutputArray: new Bytes(toHex(otherOutputArrayB)),
-          }).toScript() as mvc.Script
-        )
-      }
-    }
-
-    // 6. 解锁 P2PKH 输入并检查费率
-    const p2pkhInputIndexes = [2]
-    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, [middlePrivateKey!])
-    checkFeeRate(txComposer, this.feeb)
-
-    return { unlockCheckTxComposer, txComposer }
-  }
-
-  private async _pretreatFtUtxos(
+  protected async _pretreatFtUtxos(
     paramFtUtxos: ParamFtUtxo[],
     codehash?: string,
     genesis?: string,

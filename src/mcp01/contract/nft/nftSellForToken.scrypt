@@ -2,6 +2,27 @@ import "nftProto.scrypt";
 import "../token/tokenProto.scrypt";
 import "../txUtil.scrypt";
 
+// 📌 设计说明（非安全漏洞）
+// ---------------------------------------------------------------------------
+// 本合约没有 nftCodeHash / nftID 字段，也不校验传入的 nftScript 是否就是
+// 本挂单想要卖的 NFT。
+//
+// 为什么可以：
+//   1. 卖家安全由“校验 FT 输入 + 输出 FT 给卖家”保证，卖家只关心收到目标 FT。
+//   2. 买家安全由配对合约（TokenBuyForNft）或 NftUnlockContractCheck 保证，
+//      买家锁会校验自己要的 NFT 身份。
+//   3. 交易由买家/撮合方构造时，买家自利驱动会确保自己拿到想要的 NFT。
+//
+// 依赖约束：
+//   - 业务层保证订单与 NFT 一一对应
+//   - 买家侧使用 TokenBuyForNft / NftUnlockContractCheck 正确配置 nftID
+//
+// 残余风险（用户误操作层面）：
+//   如果同一个 NftSellForToken 参数被复用，多个 NFT 会共用一个合约地址；
+//   此时 OP_REFUND 可能退回该地址上的任意 NFT。这不是配对交易漏洞，
+//   但建议业务层保证“一个挂单地址只对应一个 NFT”。
+// ---------------------------------------------------------------------------
+
 contract NftSellForToken {
     Ripemd160 senderAddress;
     int tokenAmount;
@@ -52,7 +73,8 @@ contract NftSellForToken {
         }
         else 
         {
-            // do not check nft id and codeHash to refund all kinds nft
+            // 📌 设计说明：不校验 NFT id/codeHash（详见文件头部），
+            // 买家侧由 TokenBuyForNft / NftUnlockContractCheck 保证 NFT 身份。
             bytes outputScript = NftProto.getNewNftScript(nftScript, len(nftScript), this.senderAddress);
             outputs = Utils.buildOutput(outputScript, nftOutputSatoshis);
 

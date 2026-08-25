@@ -1,0 +1,136 @@
+import "../protoheader.scrypt";
+import "tokenProto.scrypt";
+import "../txUtil.scrypt";
+
+// 📌 FtSwapLock 设计说明
+// ---------------------------------------------------------------------------
+// 用途：
+//   FT-FT 原子互换的“通用预锁合约”。买卖双方各锁一个 token，撮合后在同一笔
+//   交易里完成互换。一个合约实例同时适用于卖家侧和买家侧，只通过构造参数区分：
+//
+//     卖家锁：owner=卖家, targetToken=想收的 FT-B, targetAmount=想收的数量
+//     买家锁：owner=买家, targetToken=想收的 FT-A, targetAmount=想收的数量
+//
+// 构造参数：
+//   owner            锁仓人（也是 OP_TRADE 的目标 token 接收方）
+//   targetTokenCodeHash / targetTokenID / targetAmount
+//                    锁仓人想要收到的目标 token 及数量
+//   注意：不绑定“自己锁的 token”身份，与 NftSellForToken 设计一致。
+//
+// OP_TRADE：
+//   1. 校验目标 token 输入真实存在（prevouts + TxOutputProof + codehash/ID）
+//   2. 输出目标 token → owner（SIGHASH_SINGLE，输出必须与 lock 输入同下标）
+//   作用：保证 owner 收到“真币”，即 targetAmount 数量的目标 token。
+//   自己锁的 token 是否给到对方，由对方 lock 的 OP_TRADE 保证。
+//
+// OP_REFUND：
+//   1. owner 签名
+//   2. 把 lockedTokenScript 指定的 token 退回 owner
+//   作用：没有匹配/撮合失败时退单。owner 自己传入正确的 lockedTokenScript，
+//   确保退的是自己锁的 token。
+//
+// 安全模型：
+//   - 卖家安全：自己的 lock OP_TRADE 校验目标输入 + 输出目标 token 给 owner
+//   - 买家安全：对方 lock OP_TRADE 校验目标输入（对称保证）
+//   - 不需要信任对手方或撮合方构造的交易
+//
+// 典型配对交易输入布局（由业务层/撮合方构造）：
+//   0 = FtSwapLock_A（卖家锁）
+//   1 = FtSwapLock_B（买家锁）
+//   2 = SPACE 手续费
+//   3 = FT-A UTXO（被卖家锁）
+//   4 = FT-B UTXO（被买家锁）
+//   5 = TokenUnlockContractCheck_A（FT-A 守恒校验）
+//   6 = TokenUnlockContractCheck_B（FT-B 守恒校验）
+//   输出：
+//   0 = FT-B → 卖家（卖家锁 OP_TRADE 构造，对齐输入 0）
+//   1 = FT-A → 买家（买家锁 OP_TRADE 构造，对齐输入 1）
+//   2 = SPACE 找零
+//
+// 依赖约束：
+//   - 业务层保证“一个锁地址只对应一个挂单/token”
+//   - 双方 FT 必须先锁进 FtSwapLock，再通过 TokenUnlockContractCheck 解锁
+//   - 锁定量 == 交易量（1 进 1 出，不支持部分成交/找零）
+//
+// 残余风险（用户误操作层面）：
+//   由于不绑定自己锁的 token，如果同一锁地址被多个 token 误存，
+//   OP_REFUND 可能退回该地址上的任意 token。这是设计取舍，不是配对交易漏洞。
+// ---------------------------------------------------------------------------
+
+contract FtSwapLock {
+    Ripemd160 owner;
+    bytes targetTokenCodeHash;
+    bytes targetTokenID;
+    int targetAmount;
+
+    static const int OP_TRADE = 1;
+    static const int OP_REFUND = 2;
+
+    public function unlock(
+        SigHashPreimage txPreimage,
+        bytes prevouts,
+        bytes lockedTokenScript,
+        bytes targetTokenScript,
+        bytes targetTxHeader,
+        bytes targetTxHashProof,
+        bytes targetTxSatoshiBytes,
+        int targetInputIndex,
+        int targetTokenOutputSatoshis,
+        int lockedTokenOutputSatoshis,
+        PubKey ownerPubKey,
+        Sig ownerSig,
+        int op
+    ) {
+        // 设计说明：
+        // 本合约是通用锁，不绑定“自己锁的 token”身份。
+        // - 卖家安全由 OP_TRADE 校验目标输入 + 输出目标 token 给 owner 保证；
+        // - 买家安全由配对锁（对方 FtSwapLock）校验目标输入保证；
+        // - OP_REFUND 需要 owner 签名，owner 自行传入正确的 lockedTokenScript，
+        //   确保退的是自己锁的 token。
+        // 地址隔离由业务层保证（一个锁地址只对应一个 token / 一个挂单）。
+
+        bytes outputs = b'';
+        if (op == OP_TRADE) {
+            require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
+
+            // 校验目标 FT 输入（真币）
+            bytes targetOutpoint = prevouts[targetInputIndex * TxUtil.OUTPOINT_LEN : (targetInputIndex + 1) * TxUtil.OUTPOINT_LEN];
+            int targetScriptLen = len(targetTokenScript);
+            TxOutputProof targetProof = { targetTxHeader, targetTxHashProof, targetTxSatoshiBytes, sha256(targetTokenScript) };
+            TxUtil.verifyTxOutput(targetProof, targetOutpoint);
+
+            require(this.targetTokenCodeHash == TokenProto.getScriptCodeHash(targetTokenScript, targetScriptLen));
+            require(this.targetTokenID == TokenProto.getTokenID(targetTokenScript, targetScriptLen));
+            require(this.targetAmount > 0);
+
+            // 只构造目标 token → owner 的输出
+            bytes newTargetScript = TokenProto.getNewTokenScript(
+                targetTokenScript,
+                targetScriptLen,
+                this.owner,
+                this.targetAmount
+            );
+            outputs = Utils.buildOutput(newTargetScript, targetTokenOutputSatoshis);
+        }
+        else if (op == OP_REFUND) {
+            require(hash160(ownerPubKey) == this.owner);
+            require(checkSig(ownerSig, ownerPubKey));
+
+            // 自己锁的 token 退回 owner
+            int lockedTokenScriptLen = len(lockedTokenScript);
+            bytes refundScript = TokenProto.getNewTokenScript(
+                lockedTokenScript,
+                lockedTokenScriptLen,
+                this.owner,
+                TokenProto.getTokenAmount(lockedTokenScript, lockedTokenScriptLen)
+            );
+            outputs = Utils.buildOutput(refundScript, lockedTokenOutputSatoshis);
+        }
+        else {
+            require(false);
+        }
+
+        require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
+        require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_SINGLE));
+    }
+}

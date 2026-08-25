@@ -1,0 +1,202 @@
+{
+    "version": 9,
+    "compilerVersion": "1.17.3+commit.b1bcb14",
+    "contract": "FtSwapLock",
+    "md5": "da99b8529fafacae2b84e326b424363c",
+    "structs": [
+        {
+            "name": "LockingScriptParts",
+            "params": [
+                {
+                    "name": "code",
+                    "type": "bytes"
+                },
+                {
+                    "name": "data",
+                    "type": "bytes"
+                }
+            ],
+            "genericTypes": []
+        },
+        {
+            "name": "OpPushData",
+            "params": [
+                {
+                    "name": "len",
+                    "type": "int"
+                },
+                {
+                    "name": "value",
+                    "type": "int"
+                }
+            ],
+            "genericTypes": []
+        },
+        {
+            "name": "VarIntData",
+            "params": [
+                {
+                    "name": "len",
+                    "type": "int"
+                },
+                {
+                    "name": "value",
+                    "type": "int"
+                }
+            ],
+            "genericTypes": []
+        },
+        {
+            "name": "TxInputProof",
+            "params": [
+                {
+                    "name": "hashProof",
+                    "type": "bytes"
+                },
+                {
+                    "name": "txHash",
+                    "type": "bytes"
+                },
+                {
+                    "name": "outputIndexBytes",
+                    "type": "bytes"
+                },
+                {
+                    "name": "sequenceBytes",
+                    "type": "bytes"
+                }
+            ],
+            "genericTypes": []
+        },
+        {
+            "name": "TxOutputProof",
+            "params": [
+                {
+                    "name": "txHeader",
+                    "type": "bytes"
+                },
+                {
+                    "name": "hashProof",
+                    "type": "bytes"
+                },
+                {
+                    "name": "satoshiBytes",
+                    "type": "bytes"
+                },
+                {
+                    "name": "scriptHash",
+                    "type": "bytes"
+                }
+            ],
+            "genericTypes": []
+        }
+    ],
+    "library": [
+        {
+            "name": "TxUtil",
+            "params": [],
+            "properties": [],
+            "genericTypes": []
+        },
+        {
+            "name": "ProtoHeader",
+            "params": [],
+            "properties": [],
+            "genericTypes": []
+        },
+        {
+            "name": "TokenProto",
+            "params": [],
+            "properties": [],
+            "genericTypes": []
+        }
+    ],
+    "alias": [],
+    "abi": [
+        {
+            "type": "function",
+            "name": "unlock",
+            "index": 0,
+            "params": [
+                {
+                    "name": "txPreimage",
+                    "type": "SigHashPreimage"
+                },
+                {
+                    "name": "prevouts",
+                    "type": "bytes"
+                },
+                {
+                    "name": "lockedTokenScript",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetTokenScript",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetTxHeader",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetTxHashProof",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetTxSatoshiBytes",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetInputIndex",
+                    "type": "int"
+                },
+                {
+                    "name": "targetTokenOutputSatoshis",
+                    "type": "int"
+                },
+                {
+                    "name": "lockedTokenOutputSatoshis",
+                    "type": "int"
+                },
+                {
+                    "name": "ownerPubKey",
+                    "type": "PubKey"
+                },
+                {
+                    "name": "ownerSig",
+                    "type": "Sig"
+                },
+                {
+                    "name": "op",
+                    "type": "int"
+                }
+            ]
+        },
+        {
+            "type": "constructor",
+            "params": [
+                {
+                    "name": "owner",
+                    "type": "Ripemd160"
+                },
+                {
+                    "name": "targetTokenCodeHash",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetTokenID",
+                    "type": "bytes"
+                },
+                {
+                    "name": "targetAmount",
+                    "type": "int"
+                }
+            ]
+        }
+    ],
+    "stateProps": [],
+    "buildType": "debug",
+    "file": "file:///D:/Project/Sample/mvc/meta-contract/src/mcp02/contract/token/ftSwapLock.scrypt",
+    "hex": "515301402097dfd76851bf465e8f715593b217714858bbe9570ff3bd5e33840a34e20ff0262102ba79df5f8ae7604a9830f03c7933028186aede0675a16f025dc4f8be8eec0382201008ce7480da41702918d1ec8e6849ba32b4d65b1e40dc669c31a1e6306b266c547954798501145593760124937601149376589376011493768b7601149376012893765293<owner><targetTokenCodeHash><targetTokenID><targetAmount>00011579519c63012079aa0122797601247f75547f777788012079011b798b0124957f75011b790124957f77011f798277011f79011f79011f79012379a8707059795479aa7801207f75887601207f777601007e81775579607f755c7f777601007e8177567901707f7501507f775679827752790128959d5679a878885479827701209d557955797e76587955798b0128957f7555790128957f7788756d6d6d6d597901257956796e6e011279947f757777a9777788587901257956796e011779940124937f7578011679947f77a9777788577900a06901247955795c795a7970011579947f7552797e78586e8b80767682778c7f75007f777777777e54795479011879947f777e77777777760121797658805279768277007802fd009f6378516e8b80767682778c7f75007f77777777776778030000019f6301fd5279526e8b80767682778c7f75007f777777777e7767780500000000019f6301fe5279546e8b80767682778c7f75007f777777777e776778090000000000000000019f6301ff5279586e8b80767682778c7f75007f777777777e77686868687653797e7777777e7777587a75577a577a577a577a577a577a577a6d6d6d7567011579529c63011779a9557988011679011879ad011f79827701207978577901237954796e011379947f7578011279947f777601007e81777777706079947f7552797e78586e8b80767682778c7f75007f777777777e54795479011379947f777e7777777776011b797658805279768277007802fd009f6378516e8b80767682778c7f75007f77777777776778030000019f6301fd5279526e8b80767682778c7f75007f777777777e7767780500000000019f6301fe5279546e8b80767682778c7f75007f777777777e776778090000000000000000019f6301ff5279586e8b80767682778c7f75007f777777777e77686868687653797e7777777e7777537a757777670069686876aa0122797682776e58947f75780128947f777777880121795f7978011479011479210ac407f0e4bd44bfc207355a778b046225a7068fc59ee7eda43ad905aadbffc800206c266b30e6a1319c66dc401e5bd6b432ba49688eecd118297041da8074ce081001167956795679aa7676517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e817757795679567956795679537956795479577995939521414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff006e6e9776009f63765279936776687777777b757c6e5296a063765279947b757c6853798277527982775379012080517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01205279947f77545379935279930130787e527e54797e58797e527e53797e52797e57797e777777777777777777777777ab765779ac777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777",
+    "sourceMapFile": ""
+}

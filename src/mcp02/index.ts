@@ -1724,11 +1724,14 @@ export class FtManager {
       throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'FT should belong to the swap order owner!')
     }
 
+    // 每个订单使用锁定 FT UTXO 的 "txid_outputIndex" 作为 salt，保证锁地址唯一
+    const salt = `${lockTokenUtxo.txId}_${lockTokenUtxo.outputIndex}`
     const contract = FtSwapLockFactory.createContract({
       owner: new Ripemd160(toHex(ownerAddress.hashBuffer)),
       targetTokenCodeHash: new Bytes(wantTokenCodeHash),
       targetTokenID: new Bytes(wantTokenId),
       targetAmount: wantAmount,
+      salt: new Bytes(Buffer.from(salt, 'utf8').toString('hex')),
     })
 
     let middleAddress: mvc.Address
@@ -1797,6 +1800,7 @@ export class FtManager {
       sellTxHex: sellTxComposer.getRawHex(),
       sellTxId: sellTxComposer.getTxId(),
       sellOutputIndex,
+      salt,
       ...transferResult,
     }
   }
@@ -2686,11 +2690,13 @@ export class FtManager {
       }
 
       // 5.3 解锁 FtSwapLock_A
+      // salt 只影响锁定脚本地址，不影响 unlock 参数；重建实例时使用 dummy salt 即可
       const lockAContract = FtSwapLockFactory.createContract({
         owner: new Ripemd160(toHex(sellerAddress.hashBuffer)),
         targetTokenCodeHash: new Bytes(tokenBCodeHash),
         targetTokenID: new Bytes(tokenBID),
         targetAmount: sellUtxo.tokenBAmount,
+        salt: new Bytes('00'),
       })
       const lockASubScript: any = lockAUtxo.lockingScript
       const lockAPreimage = new SigHashPreimage(
@@ -2754,6 +2760,7 @@ export class FtManager {
           targetTokenCodeHash: new Bytes(tokenACodeHash),
           targetTokenID: new Bytes(tokenAID),
           targetAmount: ftA.tokenAmount.toNumber(),
+          salt: new Bytes('00'),
         })
         const lockBSubScript: any = lockBUtxo.lockingScript
         const lockBPreimage = new SigHashPreimage(

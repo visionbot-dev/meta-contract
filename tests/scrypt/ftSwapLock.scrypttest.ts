@@ -67,6 +67,7 @@ describe('FtSwapLock contract (local scrypt test)', () => {
       targetTokenCodeHash: new Bytes(target.getCodeHash()),
       targetTokenID: new Bytes(toHex(getTokenID(targetTokenScript.toBuffer()))),
       targetAmount: TARGET_AMOUNT,
+      salt: new Bytes(Buffer.from('locked_txid_0', 'utf8').toString('hex')),
     })
     contractScript = contract.lockingScript
     contractSubScript = (contractScript as any).subScript(0)

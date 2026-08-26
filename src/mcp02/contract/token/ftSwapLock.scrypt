@@ -15,7 +15,10 @@ import "../txUtil.scrypt";
 //   owner            锁仓人（也是 OP_TRADE 的目标 token 接收方）
 //   targetTokenCodeHash / targetTokenID / targetAmount
 //                    锁仓人想要收到的目标 token 及数量
+//   salt             订单唯一盐值，通常取被锁定 FT UTXO 的 "txid_outputIndex"，
+//                    确保每个订单生成不同的锁地址，避免同一地址被多个订单/token 复用。
 //   注意：不绑定“自己锁的 token”身份，与 NftSellForToken 设计一致。
+//         地址隔离通过 salt 实现：每个订单使用独立 salt，地址不会复用。
 //
 // OP_TRADE：
 //   1. 校验目标 token 输入真实存在（prevouts + TxOutputProof + codehash/ID）
@@ -48,7 +51,7 @@ import "../txUtil.scrypt";
 //   2 = SPACE 找零
 //
 // 依赖约束：
-//   - 业务层保证“一个锁地址只对应一个挂单/token”
+//   - 每个订单使用独立 salt，锁地址天然唯一，不依赖业务层维护“一个地址一个订单”
 //   - 双方 FT 必须先锁进 FtSwapLock，再通过 TokenUnlockContractCheck 解锁
 //   - 锁定量 == 交易量（1 进 1 出，不支持部分成交/找零）
 //
@@ -62,6 +65,7 @@ contract FtSwapLock {
     bytes targetTokenCodeHash;
     bytes targetTokenID;
     int targetAmount;
+    bytes salt;
 
     static const int OP_TRADE = 1;
     static const int OP_REFUND = 2;
@@ -87,7 +91,8 @@ contract FtSwapLock {
         // - 买家安全由配对锁（对方 FtSwapLock）校验目标输入保证；
         // - OP_REFUND 需要 owner 签名，owner 自行传入正确的 lockedTokenScript，
         //   确保退的是自己锁的 token。
-        // 地址隔离由业务层保证（一个锁地址只对应一个 token / 一个挂单）。
+        // 地址隔离由 salt 保证：每个订单使用独立 salt（锁定 FT UTXO 的 txid_outputIndex），
+        // 锁地址不会复用。
 
         bytes outputs = b'';
         if (op == OP_TRADE) {

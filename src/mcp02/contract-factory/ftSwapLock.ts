@@ -12,6 +12,7 @@ export class FtSwapLock extends ContractAdapter {
     targetTokenCodeHash: Bytes
     targetTokenID: Bytes
     targetAmount: number
+    salt: Bytes
   }
 
   constructor(constuctParams: {
@@ -19,6 +20,7 @@ export class FtSwapLock extends ContractAdapter {
     targetTokenCodeHash: Bytes
     targetTokenID: Bytes
     targetAmount: number
+    salt: Bytes
   }) {
     const desc = require('../contract-desc/ftSwapLock_desc.json')
     const ClassObj = buildContractClass(desc)
@@ -26,7 +28,8 @@ export class FtSwapLock extends ContractAdapter {
       constuctParams.owner,
       constuctParams.targetTokenCodeHash,
       constuctParams.targetTokenID,
-      constuctParams.targetAmount
+      constuctParams.targetAmount,
+      constuctParams.salt
     )
     super(contract)
     this.constuctParams = constuctParams
@@ -101,6 +104,7 @@ export class FtSwapLockFactory {
     targetTokenCodeHash: Bytes
     targetTokenID: Bytes
     targetAmount: number
+    salt: Bytes
   }): FtSwapLock {
     return new FtSwapLock(params)
   }
@@ -111,6 +115,7 @@ export class FtSwapLockFactory {
       targetTokenCodeHash: new Bytes('22'.repeat(20)),
       targetTokenID: new Bytes('33'.repeat(20)),
       targetAmount: 1,
+      salt: new Bytes('44'.repeat(16)),
     })
     return dummy.lockingScript.toBuffer().length
   }
@@ -121,6 +126,7 @@ export class FtSwapLockFactory {
       targetTokenCodeHash: new Bytes('22'.repeat(20)),
       targetTokenID: new Bytes('33'.repeat(20)),
       targetAmount: 1,
+      salt: new Bytes('44'.repeat(16)),
     })
     const preimage = new SigHashPreimage('00'.repeat(180))
     const call =

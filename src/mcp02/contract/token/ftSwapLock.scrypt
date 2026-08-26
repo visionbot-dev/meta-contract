@@ -106,7 +106,6 @@ contract FtSwapLock {
 
             require(this.targetTokenCodeHash == TokenProto.getScriptCodeHash(targetTokenScript, targetScriptLen));
             require(this.targetTokenID == TokenProto.getTokenID(targetTokenScript, targetScriptLen));
-            require(this.targetAmount > 0);
 
             // 只构造目标 token → owner 的输出
             bytes newTargetScript = TokenProto.getNewTokenScript(

@@ -1691,6 +1691,9 @@ export class FtManager {
   }) {
     checkParamGenesis(lockTokenGenesis)
     checkParamCodehash(lockTokenCodeHash)
+    if (!wantAmount || wantAmount <= 0) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'wantAmount must be greater than 0.')
+    }
 
     let ownerPrivateKey: mvc.PrivateKey | undefined
     let ownerPublicKey: mvc.PublicKey | undefined

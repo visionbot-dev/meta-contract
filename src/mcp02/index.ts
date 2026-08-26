@@ -1167,7 +1167,7 @@ export class FtManager {
     codehash: string
     genesis: string
     ftUtxo: ParamFtUtxo
-    sellerWif: string
+    sellerWif?: string
     price: number
     utxos?: ParamUtxo[]
     changeAddress?: string | mvc.Address
@@ -1178,9 +1178,16 @@ export class FtManager {
     checkParamGenesis(genesis)
     checkParamCodehash(codehash)
 
-    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
-    const sellerPublicKey = sellerPrivateKey.toPublicKey()
-    const sellerAddress = sellerPublicKey.toAddress(this.network)
+    let sellerPrivateKey: mvc.PrivateKey | undefined
+    let sellerPublicKey: mvc.PublicKey | undefined
+    let sellerAddress: mvc.Address
+    if (sellerWif) {
+      sellerPrivateKey = new mvc.PrivateKey(sellerWif)
+      sellerPublicKey = sellerPrivateKey.toPublicKey()
+      sellerAddress = sellerPublicKey.toAddress(this.network)
+    } else {
+      sellerAddress = await this._getSignerAddress()
+    }
 
     const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (utxos.length > 3) {
@@ -1205,13 +1212,24 @@ export class FtManager {
     })
 
     let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
+    let middleKey: mvc.PrivateKey | undefined
     if (middleChangeAddress) {
       middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
+      middleKey = middleWif ? new mvc.PrivateKey(middleWif) : undefined
     } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
+      if (utxoPrivateKeys[0]) {
+        middleAddress = utxos[0].address as mvc.Address
+        middleKey = utxoPrivateKeys[0]
+      } else {
+        middleAddress = await this._getSignerAddress()
+        middleKey = undefined
+      }
+    }
+    if (!middleKey && !this.signer) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'middleWif or signer is required for sell.'
+      )
     }
 
     // Tx1: 创建 TokenSell 挂单输出
@@ -1223,7 +1241,7 @@ export class FtManager {
       dustCalculator: this.dustCalculator,
     })
     const sellChangeOutputIndex = addChangeOutput(sellTxComposer, middleAddress, this.feeb)
-    unlockP2PKHInputs(sellTxComposer, sellP2pkhInputIndexes, utxoPrivateKeys)
+    await this._unlockP2PKHInputs(sellTxComposer, sellP2pkhInputIndexes, utxoPrivateKeys)
     checkFeeRate(sellTxComposer, this.feeb)
 
     const tokenSellAddress = new mvc.Address(
@@ -1245,12 +1263,12 @@ export class FtManager {
           outputIndex: sellChangeOutputIndex,
           satoshis: sellTxComposer.getOutput(sellChangeOutputIndex).satoshis,
           address: middleAddress.toString(),
-          wif: middleKey.toString(),
+          wif: middleKey ? middleKey.toString() : undefined,
         },
       ],
       changeAddress: middleAddress,
       middleChangeAddress: middleAddress,
-      middlePrivateKey: middleKey.toString(),
+      middlePrivateKey: middleKey ? middleKey.toString() : undefined,
       opreturnData,
     })
 
@@ -1281,7 +1299,7 @@ export class FtManager {
     genesis: string
     ftUtxo: ParamFtUtxo
     sellUtxo: FtSellUtxo
-    sellerWif: string
+    sellerWif?: string
     utxos?: ParamUtxo[]
     changeAddress?: string | mvc.Address
     middleChangeAddress?: string | mvc.Address
@@ -1291,8 +1309,14 @@ export class FtManager {
     checkParamGenesis(genesis)
     checkParamCodehash(codehash)
 
-    const sellerPrivateKey = new mvc.PrivateKey(sellerWif)
-    const sellerAddress = sellerPrivateKey.toAddress(this.network)
+    let sellerPrivateKey: mvc.PrivateKey | undefined
+    let sellerAddress: mvc.Address
+    if (sellerWif) {
+      sellerPrivateKey = new mvc.PrivateKey(sellerWif)
+      sellerAddress = sellerPrivateKey.toAddress(this.network)
+    } else {
+      sellerAddress = await this._getSignerAddress()
+    }
 
     const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
     if (utxos.length > 3) {
@@ -1303,13 +1327,24 @@ export class FtManager {
     }
 
     let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
+    let middleKey: mvc.PrivateKey | undefined
     if (middleChangeAddress) {
       middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
+      middleKey = middleWif ? new mvc.PrivateKey(middleWif) : undefined
     } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
+      if (utxoPrivateKeys[0]) {
+        middleAddress = utxos[0].address as mvc.Address
+        middleKey = utxoPrivateKeys[0]
+      } else {
+        middleAddress = await this._getSignerAddress()
+        middleKey = undefined
+      }
+    }
+    if (!middleKey && !this.signer) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'middleWif or signer is required for cancelSell.'
+      )
     }
 
     const { unlockCheckTxComposer, txComposer } = await this._createSellOrderTx({
@@ -1373,8 +1408,10 @@ export class FtManager {
     let buyerAddr: mvc.Address
     if (buyerAddress) {
       buyerAddr = new mvc.Address(buyerAddress, this.network)
-    } else {
+    } else if (buyerWif) {
       buyerAddr = new mvc.PrivateKey(buyerWif).toAddress(this.network)
+    } else {
+      buyerAddr = await this._getSignerAddress()
     }
 
     const { utxos, utxoPrivateKeys } = prepareUtxos(utxosInput)
@@ -1386,13 +1423,24 @@ export class FtManager {
     }
 
     let middleAddress: mvc.Address
-    let middleKey: mvc.PrivateKey
+    let middleKey: mvc.PrivateKey | undefined
     if (middleChangeAddress) {
       middleAddress = new mvc.Address(middleChangeAddress, this.network)
-      middleKey = new mvc.PrivateKey(middleWif)
+      middleKey = middleWif ? new mvc.PrivateKey(middleWif) : undefined
     } else {
-      middleAddress = utxos[0].address as mvc.Address
-      middleKey = utxoPrivateKeys[0]
+      if (utxoPrivateKeys[0]) {
+        middleAddress = utxos[0].address as mvc.Address
+        middleKey = utxoPrivateKeys[0]
+      } else {
+        middleAddress = await this._getSignerAddress()
+        middleKey = undefined
+      }
+    }
+    if (!middleKey && !this.signer) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'middleWif or signer is required for buy.'
+      )
     }
 
     const { unlockCheckTxComposer, txComposer } = await this._createSellOrderTx({
@@ -2949,7 +2997,7 @@ export class FtManager {
       dustCalculator: this.dustCalculator,
     })
     const unlockCheckChangeOutputIndex = addChangeOutput(unlockCheckTxComposer, middleChangeAddress, this.feeb)
-    unlockP2PKHInputs(unlockCheckTxComposer, unlockCheckP2pkhInputIndices, utxoPrivateKeys)
+    await this._unlockP2PKHInputs(unlockCheckTxComposer, unlockCheckP2pkhInputIndices, utxoPrivateKeys)
     checkFeeRate(unlockCheckTxComposer, this.feeb)
 
     const unlockCheckUtxo = {
@@ -3123,22 +3171,35 @@ export class FtManager {
       }
       if (op === TOKEN_SELL_OP.CANCEL) {
         unlockSellArgs.tokenScript = new Bytes(tokenLockingScript.toHex())
-        unlockSellArgs.senderPubKey = new PubKey(toHex(sellerPrivateKey!.publicKey.toBuffer()))
-        unlockSellArgs.senderSig = new Sig(
-          toHex(signTx(txComposer.getTx(), sellerPrivateKey!, sellUtxoInfo.lockingScript, sellUtxoInfo.satoshis, sellInputIndex, sighashType))
-        )
+        if (sellerPrivateKey) {
+          unlockSellArgs.senderPubKey = new PubKey(toHex(sellerPrivateKey.publicKey.toBuffer()))
+          unlockSellArgs.senderSig = new Sig(
+            toHex(signTx(txComposer.getTx(), sellerPrivateKey, sellUtxoInfo.lockingScript, sellUtxoInfo.satoshis, sellInputIndex, sighashType))
+          )
+        } else if (this.signer) {
+          // Metalet 模式：seller 对 TokenSell OP_CANCEL 输入签名
+          const sr = await this.signer.signInput(txComposer, sellInputIndex)
+          unlockSellArgs.senderPubKey = new PubKey(sr.pubKeyHex)
+          unlockSellArgs.senderSig = new Sig(sr.sig)
+        } else {
+          throw new CodeError(
+            ErrCode.EC_INVALID_ARGUMENT,
+            'cancelSell requires sellerWif or signer to sign TokenSell.'
+          )
+        }
         unlockSellArgs.tokenOutputSatoshis = ftOutputSatoshis
       }
       const unlockSellCall = tokenSellContract.unlock(unlockSellArgs)
       txComposer.getInput(sellInputIndex).setScript(unlockSellCall.toScript() as mvc.Script)
 
       if (this.debug) {
-        const ret = unlockSellCall.verify({
-          tx: txComposer.getTx(),
-          inputIndex: sellInputIndex,
-          inputSatoshis: txComposer.getInput(sellInputIndex).output.satoshis,
-        })
-        if (!ret.success) throw ret
+        this._verifyScriptInput(
+          unlockSellCall.toScript() as mvc.Script,
+          sellUtxoInfo.lockingScript,
+          txComposer.getTx(),
+          sellInputIndex,
+          txComposer.getInput(sellInputIndex).output.satoshis
+        )
       }
 
       // 5.3 解锁 unlockCheck
@@ -3204,7 +3265,24 @@ export class FtManager {
     }
 
     // 6. 解锁 P2PKH 输入并检查费率
-    unlockP2PKHInputs(txComposer, p2pkhInputIndexes, [middlePrivateKey!])
+    if (middlePrivateKey) {
+      unlockP2PKHInputs(txComposer, p2pkhInputIndexes, [middlePrivateKey])
+    } else if (this.signer) {
+      const sr = await this.signer.signInput(txComposer, p2pkhInputIndexes[0])
+      const derHex = sr.sig.slice(0, -2)
+      txComposer.getInput(p2pkhInputIndexes[0]).setScript(
+        mvc.Script.buildPublicKeyHashIn(
+          new mvc.PublicKey(sr.pubKeyHex),
+          Buffer.from(derHex, 'hex'),
+          sighashType
+        )
+      )
+    } else {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'buy/cancelSell mainTx SPACE input needs middleWif/privateKey or a signer.'
+      )
+    }
     checkFeeRate(txComposer, this.feeb)
 
     return { unlockCheckTxComposer, txComposer }

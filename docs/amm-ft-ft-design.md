@@ -81,7 +81,7 @@ v2.0 的核心思路：
 | 流动性铸造/回收 | add=池子转出 LP，remove=用户归还并合并回池内储备 | 用普通 FT 转账语义模拟 Uniswap 的 mint/burn |
 | 初始 LP 计算 | CREATE_POOL 内建初始流动性：`ΔL = min(inA, inB)` | 避免链上开方 |
 | 添加流动性比例 | 严格等比例 | 避免“多退少补” |
-| 最小储备 | 合约强制 `reserveA/reserveB >= minReserve` | 防“微小池”份额操纵 |
+| 最小储备 | 合约强制**新状态** `reserveA/reserveB >= minReserve` | 防“微小池”份额操纵，且操作后池子仍健康 |
 | 池状态载体 | **池 UTXO data part** | 状态唯一、可验证、防储备歧义 |
 | 池 UTXO 更新 | **TokenGenesis 链式更新 + Backtrace** | 防伪造池 UTXO，链可追踪 |
 | 索引兼容 | **池 UTXO 伪装为标准 FT（protoType=1）** | 现有索引器零改动可找回 |
@@ -253,9 +253,9 @@ feeBps = 池子构造参数
   inA > 0
   effectiveInA > 0
   outB > 0
-  reserveA_old >= minReserve
-  reserveB_old >= minReserve
   reserveB_new > 0
+  reserveA_new >= minReserve
+  reserveB_new >= minReserve
   (reserveA_old + effectiveInA) * reserveB_new >= reserveA_old * reserveB_old
 ```
 
@@ -277,6 +277,10 @@ LP 铸造量（池子转出量）：
   reserveA_new = reserveA_old + inA
   reserveB_new = reserveB_old + inB
   lpReserve_new = lpReserve_old - ΔL
+
+合约校验：
+  reserveA_new >= minReserve
+  reserveB_new >= minReserve
 ```
 
 ### 6.3 REMOVE_LIQUIDITY
@@ -298,6 +302,10 @@ lpReturn = 用户归还的 LP-FT 数量
   reserveA_new = reserveA_old - outA
   reserveB_new = reserveB_old - outB
   lpReserve_new = lpReserve_old + lpReturn
+
+合约校验：
+  reserveA_new >= minReserve
+  reserveB_new >= minReserve
 ```
 
 > 溢出防护：所有乘法必须保证结果在 sCrypt `int`（64 位）范围内。
@@ -468,7 +476,7 @@ require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
 5. **池子 Proto 独立成段**：索引器不识别，业务层从 txHex 剥离末尾 172 字节后解析。
 6. **用户输入必须非池地址（H1）**：所有用户输入 `tokenAddress != 池地址`。
 7. **输出地址绑定输入 owner（L2）**。
-8. **最小储备（M1）**、**溢出防护（M2）**、**LP 总量固定**。
+8. **最小储备（M1，校验新状态）**、**溢出防护（M2）**、**LP 总量固定**。
 
 ---
 
@@ -584,7 +592,7 @@ require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
 2. **等比例 add**。
 3. **remove 取整归池**。
 4. **LP 总量固定**。
-5. **最小储备（M1）**。
+5. **最小储备（M1，校验新状态）**。
 6. **溢出防护（M2）**。
 
 ### 10.3 已知限制（非漏洞）
@@ -650,7 +658,7 @@ genesisHash/genesisTxid = 池链标识
 | `effectiveInA <= 0` | 拒绝（提示增大金额） |
 | `feeBps` 非法 | 拒绝 |
 | swap 后 `reserveB_new <= 0` | 拒绝（不允许抽干池子） |
-| `reserveA/reserveB < minReserve` | 拒绝 |
+| 新状态 `reserveA_new/reserveB_new < minReserve` | 拒绝（M1，操作后池子必须保持健康） |
 | add 比例不满足 | 拒绝 |
 | 用户输入 `tokenAddress == 池地址` | 拒绝（H1） |
 | 用户输出地址 != 输入 owner | 拒绝（L2） |

@@ -124,9 +124,6 @@ contract FtAmmPool {
         int reserveB_old = Utils.fromLEUnsigned(poolProto[8 : 16]);
         int lpReserve_old = Utils.fromLEUnsigned(poolProto[16 : 24]);
 
-        require(reserveA_old >= this.minReserve);
-        require(reserveB_old >= this.minReserve);
-
         // ========== 校验池内储备 FT 输入 ==========
         bytes poolAddress = hash160(poolScript);
 
@@ -273,6 +270,10 @@ contract FtAmmPool {
         else {
             require(false);
         }
+
+        // ========== 只校验新状态：操作后池子储备必须满足最小储备 ==========
+        require(newReserveA >= this.minReserve);
+        require(newReserveB >= this.minReserve);
 
         // ========== 构造新池 UTXO 脚本 ==========
         // 1. 更新标准 FT 数据中的 genesisTxid（首次写入 thisOutpoint，之后保持不变）

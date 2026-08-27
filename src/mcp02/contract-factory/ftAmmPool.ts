@@ -17,6 +17,7 @@ export type FtAmmPoolUnlockArgs = {
   txPreimage: SigHashPreimage
   prevouts: Bytes
   op: FT_AMM_POOL_OP
+  swapDirection?: number
   // 池内储备 FT 输入
   oldTokenAScript: Bytes
   oldTokenBScript: Bytes
@@ -117,6 +118,7 @@ export class FtAmmPool extends ContractAdapter {
       proof && proof.txHeader ? new Cls(proof) : proof
 
     const opts = {
+      swapDirection: 0,
       userTokenScriptA: new Bytes(''),
       userTokenScriptB: new Bytes(''),
       userProofA: new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
@@ -149,6 +151,7 @@ export class FtAmmPool extends ContractAdapter {
       opts.txPreimage,
       opts.prevouts,
       opts.op,
+      opts.swapDirection,
       opts.oldTokenAScript,
       opts.oldTokenBScript,
       opts.oldLpScript,

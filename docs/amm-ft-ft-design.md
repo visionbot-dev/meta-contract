@@ -222,7 +222,9 @@ CREATE_POOL 是普通转账交易（不经过 FtAmmPool.unlock），业务层必
 
 整数运算，除法向下取整。
 
-### 6.1 SWAP（A → B）
+### 6.1 SWAP（双向）
+
+**A → B（用户卖 FT-A，买 FT-B）：**
 
 ```
 effectiveInA = inA * (10000 - feeBps) / 10000
@@ -236,6 +238,22 @@ reserveB_new = reserveB_old - outB
   reserveA_new >= minReserve
   reserveB_new >= minReserve
   (reserveA_old + effectiveInA) * reserveB_new >= reserveA_old * reserveB_old
+```
+
+**B → A（用户卖 FT-B，买 FT-A）：**
+
+```
+effectiveInB = inB * (10000 - feeBps) / 10000
+outA = reserveA_old * effectiveInB / (reserveB_old + effectiveInB)
+reserveA_new = reserveA_old - outA
+reserveB_new = reserveB_old + inB
+
+校验：
+  inB > 0, effectiveInB > 0, outA > 0
+  reserveA_new > 0
+  reserveA_new >= minReserve
+  reserveB_new >= minReserve
+  (reserveB_old + effectiveInB) * reserveA_new >= reserveA_old * reserveB_old
 ```
 
 ### 6.2 ADD_LIQUIDITY
@@ -283,11 +301,14 @@ contract FtAmmPool {
     static const int OP_SWAP = 1;
     static const int OP_ADD = 2;
     static const int OP_REMOVE = 3;
+    static const int SWAP_A_TO_B = 1;
+    static const int SWAP_B_TO_A = 2;
 
     public function unlock(
         SigHashPreimage txPreimage,
         bytes prevouts,
         int op,
+        int swapDirection,
         bytes oldTokenAScript, bytes oldTokenBScript, bytes oldLpScript,
         TxOutputProof proofA, TxOutputProof proofB, TxOutputProof proofLp,
         int reserveAInputIndex, int reserveBInputIndex, int lpInputIndex,
@@ -371,7 +392,7 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 
 ## 8. 交易布局
 
-### 8.1 SWAP（A → B）
+### 8.1 SWAP（A → B / B → A）
 
 ```
 输入：
@@ -513,7 +534,8 @@ genesisHash/genesisTxid = 池链标识
 | changeOutput 非空且非 P2PKH | 拒绝（防额外 FT 输出） |
 | 储备 FT 地址 != 池地址 | 拒绝 |
 | 储备 FT codeHash/tokenID 不匹配 | 拒绝 |
-| SWAP amountBOut != 公式值 | 拒绝 |
+| SWAP amountBOut/amountAOut != 公式值 | 拒绝 |
+| swapDirection 非法（非 A→B/B→A） | 拒绝 |
 | 新状态 `reserveA_new/B_new < minReserve` | 拒绝（M1） |
 | 用户输入 tokenAddress == 池地址 | 拒绝（H1） |
 | 用户输出地址 != 输入 owner | 拒绝（L2） |

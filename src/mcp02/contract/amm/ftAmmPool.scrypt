@@ -31,11 +31,14 @@ contract FtAmmPool {
     static const int OP_SWAP = 1;
     static const int OP_ADD = 2;
     static const int OP_REMOVE = 3;
+    static const int SWAP_A_TO_B = 1;
+    static const int SWAP_B_TO_A = 2;
 
     public function unlock(
         SigHashPreimage txPreimage,
         bytes prevouts,
         int op,
+        int swapDirection,
         // 池内储备 FT 输入
         bytes oldTokenAScript,
         bytes oldTokenBScript,
@@ -163,37 +166,75 @@ contract FtAmmPool {
         bytes userOutput = b'';
 
         if (op == OP_SWAP) {
-            // 用户 FT-A 输入校验
-            TxUtil.verifyTxOutput(userProofA, prevouts[userInputIndexA * TxUtil.OUTPOINT_LEN : (userInputIndexA + 1) * TxUtil.OUTPOINT_LEN]);
-            int userTokenScriptALen = len(userTokenScriptA);
-            require(TokenProto.getTokenID(userTokenScriptA, userTokenScriptALen) == this.tokenAID);
-            require(TokenProto.getTokenAmount(userTokenScriptA, userTokenScriptALen) == amountAIn);
-            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) != poolAddress);
-            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) == userAddress);
+            if (swapDirection == SWAP_A_TO_B) {
+                // ===== A → B：用户卖 FT-A，买 FT-B =====
+                TxUtil.verifyTxOutput(userProofA, prevouts[userInputIndexA * TxUtil.OUTPOINT_LEN : (userInputIndexA + 1) * TxUtil.OUTPOINT_LEN]);
+                int userTokenScriptALen = len(userTokenScriptA);
+                require(TokenProto.getTokenID(userTokenScriptA, userTokenScriptALen) == this.tokenAID);
+                require(TokenProto.getTokenAmount(userTokenScriptA, userTokenScriptALen) == amountAIn);
+                require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) != poolAddress);
+                require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) == userAddress);
 
-            require(amountAIn > 0);
-            require(amountBOut > 0);
+                require(amountAIn > 0);
+                require(amountBOut > 0);
 
-            int effectiveInA = amountAIn * (10000 - this.feeBps) / 10000;
-            require(effectiveInA > 0);
+                int effectiveInA = amountAIn * (10000 - this.feeBps) / 10000;
+                require(effectiveInA > 0);
 
-            // 输出必须严格等于恒定乘积公式（不允许低于公允值）
-            int outBCalc = reserveB_old * effectiveInA / (reserveA_old + effectiveInA);
-            require(outBCalc == amountBOut);
+                // 输出必须严格等于恒定乘积公式（不允许低于公允值）
+                int outBCalc = reserveB_old * effectiveInA / (reserveA_old + effectiveInA);
+                require(outBCalc == amountBOut);
 
-            newReserveA = reserveA_old + amountAIn;
-            newReserveB = reserveB_old - amountBOut;
-            require(newReserveB > 0);
-            require((reserveA_old + effectiveInA) * newReserveB >= reserveA_old * reserveB_old);
+                newReserveA = reserveA_old + amountAIn;
+                newReserveB = reserveB_old - amountBOut;
+                require(newReserveB > 0);
+                require((reserveA_old + effectiveInA) * newReserveB >= reserveA_old * reserveB_old);
 
-            // 用户 FT-B 输出（模板必须是 FT-B，不能用 FT-A）
-            bytes userBScript = TokenProto.getNewTokenScript(
-                oldTokenBScript,
-                oldTokenBScriptLen,
-                userAddress,
-                amountBOut
-            );
-            userOutput = Utils.buildOutput(userBScript, userBSatoshis);
+                // 用户 FT-B 输出（模板必须是 FT-B，不能用 FT-A）
+                bytes userBScript = TokenProto.getNewTokenScript(
+                    oldTokenBScript,
+                    oldTokenBScriptLen,
+                    userAddress,
+                    amountBOut
+                );
+                userOutput = Utils.buildOutput(userBScript, userBSatoshis);
+            }
+            else if (swapDirection == SWAP_B_TO_A) {
+                // ===== B → A：用户卖 FT-B，买 FT-A =====
+                TxUtil.verifyTxOutput(userProofB, prevouts[userInputIndexB * TxUtil.OUTPOINT_LEN : (userInputIndexB + 1) * TxUtil.OUTPOINT_LEN]);
+                int userTokenScriptBLen = len(userTokenScriptB);
+                require(TokenProto.getTokenID(userTokenScriptB, userTokenScriptBLen) == this.tokenBID);
+                require(TokenProto.getTokenAmount(userTokenScriptB, userTokenScriptBLen) == amountBIn);
+                require(TokenProto.getTokenAddress(userTokenScriptB, userTokenScriptBLen) != poolAddress);
+                require(TokenProto.getTokenAddress(userTokenScriptB, userTokenScriptBLen) == userAddress);
+
+                require(amountBIn > 0);
+                require(amountAOut > 0);
+
+                int effectiveInB = amountBIn * (10000 - this.feeBps) / 10000;
+                require(effectiveInB > 0);
+
+                // 输出必须严格等于恒定乘积公式
+                int outACalc = reserveA_old * effectiveInB / (reserveB_old + effectiveInB);
+                require(outACalc == amountAOut);
+
+                newReserveA = reserveA_old - amountAOut;
+                newReserveB = reserveB_old + amountBIn;
+                require(newReserveA > 0);
+                require((reserveB_old + effectiveInB) * newReserveA >= reserveA_old * reserveB_old);
+
+                // 用户 FT-A 输出（模板必须是 FT-A）
+                bytes userAScript = TokenProto.getNewTokenScript(
+                    oldTokenAScript,
+                    oldTokenAScriptLen,
+                    userAddress,
+                    amountAOut
+                );
+                userOutput = Utils.buildOutput(userAScript, userASatoshis);
+            }
+            else {
+                require(false);
+            }
         }
         else if (op == OP_ADD) {
             // 用户 FT-A / FT-B 输入校验

@@ -103,9 +103,10 @@ describe('FtAmmPoolGenesis issue (local scrypt test)', () => {
     genesisScript = genesisContract.lockingScript.toBuffer()
     genesisSubScript = (genesisContract.lockingScript as any).subScript(0)
 
-    // 创建者预锁到 genesis 地址 H_G：inA=inB=800, lpLocked=900, ΔL=800, lpReserve=100
+    // 创建者预锁到 genesis 地址 H_G：inA=200, inB=800, lpLocked=900
+    // ΔL = floor(sqrt(200*800)) = floor(sqrt(160000)) = 400, lpReserve = 900-400 = 500
     const genesisAddress = TokenUtil.getScriptHashBuf(genesisScript)
-    lockedAScript = ftProto.getNewTokenScript(tokenA.lockingScript.toBuffer(), genesisAddress, new BN(800))
+    lockedAScript = ftProto.getNewTokenScript(tokenA.lockingScript.toBuffer(), genesisAddress, new BN(200))
     lockedBScript = ftProto.getNewTokenScript(tokenB.lockingScript.toBuffer(), genesisAddress, new BN(800))
     lockedLpScript = ftProto.getNewTokenScript(lpToken.lockingScript.toBuffer(), genesisAddress, new BN(900))
 
@@ -126,9 +127,9 @@ describe('FtAmmPoolGenesis issue (local scrypt test)', () => {
     genesisTx.version = 10
     genesisTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(genesisScript), satoshis: SATOSHIS }))
 
-    // issue tx：ΔL = min(800,800) = 800, lpReserve = 900-800 = 100
-    const lpMint = 800
-    const newLpReserve = 100
+    // issue tx：ΔL = floor(sqrt(200*800)) = 400, lpReserve = 900-400 = 500
+    const lpMint = 400
+    const newLpReserve = 500
     const tx = new mvc.Transaction()
     tx.version = 10
     tx.addInput(new mvc.Transaction.Input({ prevTxId: getSatotxId(genesisTx), outputIndex: 0, script: mvc.Script.empty() }), mvc.Script.fromBuffer(genesisScript), SATOSHIS)
@@ -143,7 +144,7 @@ describe('FtAmmPoolGenesis issue (local scrypt test)', () => {
     const newPoolAddress = TokenUtil.getScriptHashBuf(newPoolScript)
 
     tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(newPoolScript), satoshis: SATOSHIS }))
-    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lockedAScript, newPoolAddress, new BN(800))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lockedAScript, newPoolAddress, new BN(200))), satoshis: SATOSHIS }))
     tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lockedBScript, newPoolAddress, new BN(800))), satoshis: SATOSHIS }))
     tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lockedLpScript, newPoolAddress, new BN(newLpReserve))), satoshis: SATOSHIS }))
     tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lockedLpScript, USER_ADDRESS, new BN(lpMint))), satoshis: SATOSHIS }))

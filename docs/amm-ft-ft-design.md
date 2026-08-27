@@ -227,7 +227,7 @@ lpReserve + 流通 LP 总量 == lpTotalSupply          // C = S - lpReserve
   5: SPACE 找零
 ```
 
-初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`、`lpLocked <= S`。
+初始 `ΔL = floor(sqrt(inA * inB))`（Uniswap v2），要求 `inA/inB >= minReserve`、`ΔL > 0`、`lpLocked <= S`。
 
 > issue 是唯一允许“储备来自预锁 tx”的步骤；PoolGenesis 校验预锁 FT 的
 > `tokenAddress == genesisAddress + codehash/ID` 保证真实性。

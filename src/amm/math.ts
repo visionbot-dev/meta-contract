@@ -21,6 +21,20 @@ function divFloor(a: BN, b: BN): BN {
   return a.div(b)
 }
 
+/** 整数向下取整平方根（牛顿迭代，bn.js 无内置 sqrt） */
+function sqrtFloor(n: BN): BN {
+  if (n.lte(new BN(0))) {
+    return new BN(0)
+  }
+  let x = n.clone()
+  let y = x.add(new BN(1)).divn(2)
+  while (y.lt(x)) {
+    x = y
+    y = x.add(n.div(x)).divn(2)
+  }
+  return x
+}
+
 /**
  * 计算手续费后的有效输入：effectiveIn = in * (10000 - feeBps) / 10000（向下取整）
  */
@@ -129,7 +143,7 @@ export function getRemoveLiquidityQuote(
 }
 
 /**
- * CREATE_POOL 初始份额：ΔL = min(inA, inB)
+ * CREATE_POOL 初始份额（Uniswap v2）：ΔL = floor(sqrt(inA * inB))
  */
 export function getCreatePoolQuote(
   amountAIn: BN,
@@ -139,7 +153,7 @@ export function getCreatePoolQuote(
   if (amountAIn.lte(new BN(0)) || amountBIn.lte(new BN(0))) {
     throw new Error('AMM math: amountAIn/amountBIn must be > 0')
   }
-  const lpMint = amountAIn.lt(amountBIn) ? amountAIn : amountBIn
+  const lpMint = sqrtFloor(amountAIn.mul(amountBIn))
   return {
     lpMint,
     lpReserve: lpTotalSupply.sub(lpMint),

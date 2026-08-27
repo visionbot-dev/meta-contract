@@ -104,15 +104,15 @@ contract FtAmmPoolGenesis {
         require(lpLocked > 0);
         require(lpLocked <= this.lpTotalSupply);
 
-        // 初始 LP：ΔL = min(inA, inB)，池内保留 lpLocked - ΔL
-        int lpMintCalc = inA;
-        if (inB < lpMintCalc) {
-            lpMintCalc = inB;
-        }
-        require(lpMintCalc > 0);
-        require(lpMintCalc == lpMint);
-        require(lpMintCalc <= lpLocked);
-        int newLpReserve = lpLocked - lpMintCalc;
+        // 初始 LP（Uniswap v2）：ΔL = floor(sqrt(inA * inB))
+        // 合约不实现开方，改为校验调用方传入的 lpMint 是精确整数平方根：
+        //   lpMint^2 <= inA*inB < (lpMint+1)^2
+        int k = mul(inA, inB);
+        require(lpMint > 0);
+        require(mul(lpMint, lpMint) <= k);
+        require(mul(add(lpMint, 1), add(lpMint, 1)) > k);
+        require(lpMint <= lpLocked);
+        int newLpReserve = lpLocked - lpMint;
 
         // 新池脚本必须是指定的 FtAmmPool 代码 + genesisTxid = PoolGenesis outpoint
         int poolScriptLen = len(poolScript);
@@ -136,7 +136,7 @@ contract FtAmmPoolGenesis {
         outputs += Utils.buildOutput(newReserveBScript, reserveBSatoshis);
         outputs += Utils.buildOutput(newLpReserveScript, lpReserveSatoshis);
 
-        bytes userLpScript = TokenProto.getNewTokenScript(lockedLpScript, lockedLpScriptLen, userAddress, lpMintCalc);
+        bytes userLpScript = TokenProto.getNewTokenScript(lockedLpScript, lockedLpScriptLen, userAddress, lpMint);
         outputs += Utils.buildOutput(userLpScript, lpUserSatoshis);
 
         outputs += changeOutput;

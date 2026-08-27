@@ -62,6 +62,12 @@ describe('AMM math', () => {
     expect(add.circulatingLp.toString()).to.equal('200')
   })
 
+  it('create pool uses Uniswap sqrt initial LP (imbalanced)', () => {
+    const created = getCreatePoolQuote(new BN(200), new BN(800), new BN(1000))
+    expect(created.lpMint.toString()).to.equal('400') // floor(sqrt(200*800)) = 400
+    expect(created.lpReserve.toString()).to.equal('600')
+  })
+
   it('remove liquidity redeems against circulating LP', () => {
     // pool: reserve 200/200, C=200 (after above add)
     const remove = getRemoveLiquidityQuote(

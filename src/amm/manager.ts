@@ -14,9 +14,11 @@ import { PLACE_HOLDER_PUBKEY, PLACE_HOLDER_SIG, sighashType } from '../common/ut
 import { TokenFactory } from '../mcp02/contract-factory/token'
 import { TOKEN_UNLOCK_TYPE, TokenUnlockContractCheckFactory } from '../mcp02/contract-factory/tokenUnlockContractCheck'
 import { FtManager, Mcp02Options, ParamFtUtxo } from '../mcp02'
+import { FtAmmPoolFactory, FT_AMM_POOL_OP } from './contract-factory/ftAmmPool'
 import { FtAmmPoolGenesisFactory } from './contract-factory/ftAmmPoolGenesis'
 import { buildPoolLockingScript, AmmPoolParams, AmmPoolData } from './builder'
 import { getCreatePoolQuote } from './math'
+import { AmmSwapDirection } from './types'
 
 const { TxInputProof, TxOutputProof } = buildTypeClasses(require('../mcp02/contract-desc/txUtil_desc.json'))
 
@@ -65,6 +67,34 @@ export type IssuePoolResult = {
   txHex: string
   poolScript: Buffer
   poolAddress: Buffer
+}
+
+export type AmmSwapParams = {
+  params: AmmPoolParams
+  /** 当前池 UTXO（txHex = 创建该池输出的交易，即上一笔操作/issue 交易） */
+  poolUtxo: { txId: string; outputIndex: number; txHex: string }
+  poolScript: Buffer
+  reserveAUtxo: ParamFtUtxo
+  reserveBUtxo: ParamFtUtxo
+  reserveLpUtxo: ParamFtUtxo
+  direction: AmmSwapDirection
+  /** 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），tokenAddress = userAddress */
+  userUtxo: ParamFtUtxo
+  userWif: string
+  userAddress: string | mvc.Address
+  amountIn: BN
+  amountOut: BN
+  newReserveA: BN
+  newReserveB: BN
+  newLpReserve: BN
+  utxos?: any[]
+  changeAddress?: string | mvc.Address
+  feeWif?: string
+}
+
+export type AmmOpResult = {
+  txid: string
+  txHex: string
 }
 
 /**
@@ -514,10 +544,379 @@ export class FtAmmPoolManager extends FtManager {
   }
 
   /**
-   * TODO(下一迭代)：SWAP / ADD / REMOVE 主交易组装。
+   * SWAP：A→B / B→A 主交易组装。
+   *
+   * 布局：
+   *   Tx2a  3 个 TokenUnlockContractCheck（A/B/LP）
+   *   Tx2b  0=旧池, 1/2/3=储备 A/B/LP, 4=用户 FT, 5/6/7=amountCheck, 8=SPACE fee
+   *         输出：0=新池, 1/2/3=新储备, 4=用户输出, 5=找零
    */
-  public async swap(_params: any): Promise<any> {
-    throw new CodeError(ErrCode.EC_INNER_ERROR, 'FtAmmPoolManager.swap: not implemented yet (next iteration).')
+  public async swap(params: AmmSwapParams): Promise<AmmOpResult> {
+    const {
+      params: poolParams,
+      poolUtxo,
+      poolScript,
+      reserveAUtxo,
+      reserveBUtxo,
+      reserveLpUtxo,
+      direction,
+      userUtxo,
+      userWif,
+      userAddress,
+      amountIn,
+      amountOut,
+      newReserveA,
+      newReserveB,
+      newLpReserve,
+      utxos,
+      changeAddress,
+      feeWif,
+    } = params
+    const utxoInfo = prepareUtxos(utxos)
+    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
+    const userAddrBuf =
+      typeof userAddress === 'string'
+        ? new mvc.Address(userAddress, this.network).hashBuffer
+        : userAddress instanceof mvc.Address
+        ? userAddress.hashBuffer
+        : userAddress
+    const aToB = direction === AmmSwapDirection.A_TO_B
+
+    // 预处理所有 FT
+    const [preA, preB, preLp, preU] = await Promise.all([
+      this._pretreatAndPerfect(reserveAUtxo),
+      this._pretreatAndPerfect(reserveBUtxo),
+      this._pretreatAndPerfect(reserveLpUtxo),
+      this._pretreatAndPerfect(userUtxo),
+    ])
+    const ftA = preA.ft
+    const ftB = preB.ft
+    const ftLp = preLp.ft
+    const ftU = preU.ft
+    const poolTx = new mvc.Transaction(poolUtxo.txHex)
+    const poolAddress = TokenUtil.getScriptHashBuf(poolScript)
+
+    // 输出脚本（satoshis 统一 1）
+    const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
+    const reserveBScriptOut = ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), poolAddress, newReserveB)
+    const lpReserveScriptOut = ftProto.getNewTokenScript(ftLp.lockingScript.toBuffer(), poolAddress, newLpReserve)
+    const userOutScript = aToB
+      ? ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), userAddrBuf, amountOut)
+      : ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), userAddrBuf, amountOut)
+
+    // 每枚 token 的输入/输出布局
+    const layouts = [
+      {
+        key: 'A',
+        ft: ftA,
+        inputs: aToB ? [1, 4] : [1],
+        outputs: [
+          { index: 1, amount: newReserveA, address: poolAddress },
+          ...(aToB ? [] : [{ index: 4, amount: amountOut, address: userAddrBuf }]),
+        ],
+      },
+      {
+        key: 'B',
+        ft: ftB,
+        inputs: aToB ? [2] : [2, 4],
+        outputs: [
+          { index: 2, amount: newReserveB, address: poolAddress },
+          ...(aToB ? [{ index: 4, amount: amountOut, address: userAddrBuf }] : []),
+        ],
+      },
+      {
+        key: 'LP',
+        ft: ftLp,
+        inputs: [3],
+        outputs: [{ index: 3, amount: newLpReserve, address: poolAddress }],
+      },
+    ]
+
+    // amountCheck 合约
+    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_2_OUT_5
+    const checkContracts = layouts.map((l) => {
+      const scriptBuf = l.ft.lockingScript.toBuffer()
+      const contract = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
+      contract.setFormatedDataPart({
+        inputTokenIndexArray: l.inputs,
+        nSender: l.inputs.length,
+        tokenCodeHash: toHex(ftProto.getContractCodeHash(scriptBuf)),
+        tokenID: toHex(ftProto.getTokenID(scriptBuf)),
+        nReceivers: l.outputs.length,
+        receiverTokenAmountArray: l.outputs.map((o) => o.amount),
+        receiverArray: l.outputs.map((o) => mvc.Address.fromPublicKeyHash(o.address, this.network)),
+      })
+      return { layout: l, contract }
+    })
+
+    // ---- Tx2a：创建 3 个 amountCheck UTXO ----
+    const ucTxComposer = new TxComposer()
+    const ucP2pkhInputIndexes = addP2PKHInputs(ucTxComposer, utxoInfo.utxos)
+    const ucOutIndexes = checkContracts.map((cc) =>
+      addContractOutput({ txComposer: ucTxComposer, lockingScript: cc.contract.lockingScript, dustCalculator: this.dustCalculator })
+    )
+    const ucChangeIndex = addChangeOutput(ucTxComposer, changeAddr, this.feeb)
+    await this._unlockP2PKHInputs(ucTxComposer, ucP2pkhInputIndexes, utxoInfo.utxoPrivateKeys)
+    checkFeeRate(ucTxComposer, this.feeb)
+    const ucTx = ucTxComposer.getTx()
+    const ucTxId = ucTxComposer.getTxId()
+    const ucUtxos = ucOutIndexes.map((oi, i) => ({
+      txId: ucTxId,
+      outputIndex: oi,
+      satoshis: ucTx.outputs[oi].satoshis,
+      lockingScript: ucTx.outputs[oi].script,
+      key: layouts[i].key,
+    }))
+    const feeUtxo = { txId: ucTxId, outputIndex: ucChangeIndex, satoshis: ucTx.outputs[ucChangeIndex].satoshis, address: changeAddr }
+
+    // ---- Tx2b：主交易 ----
+    const txComposer = new TxComposer()
+    const prevouts = new Prevouts()
+
+    const poolInputIndex = txComposer.appendInput({
+      txId: poolUtxo.txId,
+      outputIndex: poolUtxo.outputIndex,
+      satoshis: poolTx.outputs[poolUtxo.outputIndex].satoshis,
+      lockingScript: mvc.Script.fromBuffer(poolScript),
+    })
+    prevouts.addVout(poolUtxo.txId, poolUtxo.outputIndex)
+
+    const reserveAInputIndex = txComposer.appendInput(ftA)
+    prevouts.addVout(ftA.txId, ftA.outputIndex)
+    const reserveBInputIndex = txComposer.appendInput(ftB)
+    prevouts.addVout(ftB.txId, ftB.outputIndex)
+    const reserveLpInputIndex = txComposer.appendInput(ftLp)
+    prevouts.addVout(ftLp.txId, ftLp.outputIndex)
+    const userInputIndex = txComposer.appendInput(ftU)
+    prevouts.addVout(ftU.txId, ftU.outputIndex)
+
+    const ucInputIndexes = ucUtxos.map((uu) => {
+      const idx = txComposer.appendInput(uu)
+      prevouts.addVout(uu.txId, uu.outputIndex)
+      return idx
+    })
+    const feeInputIndex = addP2PKHInputs(txComposer, [feeUtxo])[0]
+    prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
+
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(poolScript), satoshis: 1 })
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(reserveAScriptOut), satoshis: 1 })
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(reserveBScriptOut), satoshis: 1 })
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(lpReserveScriptOut), satoshis: 1 })
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(userOutScript), satoshis: 1 })
+
+    // FtAmmPool 合约实例
+    const poolContract = FtAmmPoolFactory.createContract({
+      tokenACodeHash: new Bytes(poolParams.tokenACodeHash),
+      tokenAID: new Bytes(poolParams.tokenAID),
+      tokenBCodeHash: new Bytes(poolParams.tokenBCodeHash),
+      tokenBID: new Bytes(poolParams.tokenBID),
+      lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
+      lpTokenID: new Bytes(poolParams.lpTokenID),
+      lpTotalSupply: Number(poolParams.lpTotalSupply.toString()),
+      minReserve: Number(poolParams.minReserve.toString()),
+      feeBps: poolParams.feeBps,
+    })
+    poolContract.setDataPart(toHex(ftProto.newDataPart(ftProto.parseDataPart(poolScript))))
+    const poolSubScript = (poolContract.lockingScript as any).subScript(0)
+
+    const inputFtMap: { [inputIndex: number]: any } = {
+      [reserveAInputIndex]: ftA,
+      [reserveBInputIndex]: ftB,
+      [reserveLpInputIndex]: ftLp,
+      [userInputIndex]: ftU,
+    }
+    const inputProofMap: { [inputIndex: number]: any } = {
+      [reserveAInputIndex]: TokenUtil.getTxOutputProof(poolTx, 1),
+      [reserveBInputIndex]: TokenUtil.getTxOutputProof(poolTx, 2),
+      [reserveLpInputIndex]: TokenUtil.getTxOutputProof(poolTx, 3),
+      [userInputIndex]: TokenUtil.getTxOutputProof(new mvc.Transaction(userUtxo.txHex), userUtxo.outputIndex),
+    }
+
+    // Backtrace：从 poolUtxo.txHex 推导；prevOutpoint == genesisTxid 时跳过 prevPoolTxProof
+    const poolInputRes = TokenUtil.getTxInputProof(poolTx, 0)
+    const poolBacktraceArgs: any = {
+      poolTxHeader: poolInputRes[1] as Bytes,
+      prevPoolInputIndex: 0,
+      poolTxInputProof: new TxInputProof(poolInputRes[0]),
+      prevPoolTxHeader: new Bytes(''),
+      prevPoolTxOutputHashProof: new Bytes(''),
+      prevPoolTxOutputSatoshiBytes: new Bytes(''),
+    }
+    const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
+    const poolPrevOutpointTxid = poolTx.inputs[0].prevTxId.toString('hex')
+    if (poolPrevOutpointTxid !== genesisTxid) {
+      const poolOutProof = TokenUtil.getTxOutputProof(poolTx, 0)
+      poolBacktraceArgs.prevPoolTxHeader = poolOutProof.txHeader
+      poolBacktraceArgs.prevPoolTxOutputHashProof = poolOutProof.hashProof
+      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = poolOutProof.satoshiBytes
+    }
+
+    // 两轮签名
+    const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
+    for (let c = 0; c < 2; c++) {
+      txComposer.clearChangeOutput()
+      const changeOutputIndex = txComposer.appendChangeOutput(changeAddr, this.feeb)
+      const changeOutput = txComposer.getTx().outputs[changeOutputIndex]
+      const changeOutputBytes = Buffer.concat([getUInt64Buf(changeOutput.satoshis), writeVarint(changeOutput.script.toBuffer())])
+
+      // 1) 解锁所有 FT 输入，并收集每枚 token 的证明数组
+      const tokenCheckData = layouts.map((l) => ({
+        ...l,
+        tokenTxHeaderArray: Buffer.alloc(0),
+        tokenTxHashProofArray: Buffer.alloc(0),
+        tokenSatoshiBytesArray: Buffer.alloc(0),
+        inputTokenAddressArray: Buffer.alloc(0),
+        inputTokenAmountArray: Buffer.alloc(0),
+      }))
+      const layoutByKey: any = { A: tokenCheckData[0], B: tokenCheckData[1], LP: tokenCheckData[2] }
+      const ucByKey: any = { A: ucUtxos[0], B: ucUtxos[1], LP: ucUtxos[2] }
+
+      for (const l of layouts) {
+        for (const inputIndex of l.inputs) {
+          const ft = inputFtMap[inputIndex]
+          const isUserInput = inputIndex === userInputIndex
+          const tokenContract = TokenFactory.createContract(this.transferCheckCodeHashArray, this.unlockContractCodeHashArray, 2)
+          tokenContract.setDataPart(toHex(ftProto.newDataPart(ftProto.parseDataPart(ft.lockingScript.toBuffer()))))
+          const uc = ucByKey[l.key]
+          const amountCheckTxOutputProofInfo = new TxOutputProof(TokenUtil.getTxOutputProof(ucTx, uc.outputIndex))
+          const amountCheckScriptBuf = ucTx.outputs[uc.outputIndex].script.toBuffer()
+          const prevTokenInputIndex = ft.prevTokenInputIndex
+          const prevTokenAddress = new Bytes(toHex(ft.preTokenAddress.hashBuffer))
+          const prevTokenAmount = BigInt(ft.preTokenAmount.toString(10))
+          const tokenTx = new mvc.Transaction(ft.satotxInfo.txHex)
+          const inputRes = TokenUtil.getTxInputProof(tokenTx, prevTokenInputIndex)
+          const tokenTxInputProof = new TxInputProof(inputRes[0])
+          const tokenTxHeader = inputRes[1] as Bytes
+          const prevTokenTxOutputProof = new TxOutputProof(TokenUtil.getTxOutputProof(ft.prevTokenTx, ft.prevTokenOutputIndex))
+          const tokenInfoHex = TokenUtil.getTxInfoHex(tokenTx, ft.outputIndex)
+          const contractTxOutputProof = new TxOutputProof(inputProofMap[inputIndex])
+
+          const unlockArgs: any = {
+            txPreimage: txComposer.getInputPreimage(inputIndex),
+            prevouts: new Bytes(prevouts.toHex()),
+            tokenInputIndex: 0,
+            amountCheckHashIndex: tokenUnlockType - 1,
+            amountCheckInputIndex: ucInputIndexes[layouts.indexOf(l)],
+            amountCheckTxOutputProofInfo,
+            amountCheckScript: new Bytes(amountCheckScriptBuf.toString('hex')),
+            prevTokenInputIndex,
+            prevTokenAddress,
+            prevTokenAmount,
+            tokenTxHeader,
+            tokenTxInputProof,
+            prevTokenTxOutputProof,
+            contractInputIndex: inputIndex,
+            contractTxOutputProof,
+            operation: isUserInput ? ftProto.OP_TRANSFER : ftProto.OP_UNLOCK_FROM_CONTRACT,
+          }
+          if (isUserInput) {
+            unlockArgs.senderPubKey = new PubKey(toHex(userPrivKey.publicKey.toBuffer()))
+            unlockArgs.senderSig = new Sig(
+              toHex(signTx(txComposer.getTx(), userPrivKey, ft.lockingScript, ft.satoshis, inputIndex, sighashType))
+            )
+          } else {
+            unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
+            unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
+          }
+          const unlockCall = tokenContract.unlock(unlockArgs)
+          txComposer.getInput(inputIndex).setScript(unlockCall.toScript() as mvc.Script)
+
+          const td = layoutByKey[l.key]
+          td.tokenTxHeaderArray = Buffer.concat([td.tokenTxHeaderArray, Buffer.from(tokenInfoHex.txHeader, 'hex')])
+          const hashProofBuf = Buffer.from(tokenInfoHex.txHashProof, 'hex')
+          td.tokenTxHashProofArray = Buffer.concat([td.tokenTxHashProofArray, getUInt32Buf(hashProofBuf.length), hashProofBuf])
+          td.tokenSatoshiBytesArray = Buffer.concat([td.tokenSatoshiBytesArray, Buffer.from(tokenInfoHex.txSatoshi, 'hex')])
+          td.inputTokenAddressArray = Buffer.concat([td.inputTokenAddressArray, ft.tokenAddress.hashBuffer])
+          td.inputTokenAmountArray = Buffer.concat([td.inputTokenAmountArray, ft.tokenAmount.toBuffer({ endian: 'little', size: 8 })])
+        }
+      }
+
+      // 2) 解锁 FtAmmPool
+      const poolProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
+      const poolPreimage = new SigHashPreimage(
+        toHex(getPreimage(txComposer.getTx(), poolSubScript, txComposer.getInput(poolInputIndex).output.satoshis, poolInputIndex))
+      )
+      const poolUnlockArgs: any = {
+        txPreimage: poolPreimage,
+        prevouts: new Bytes(prevouts.toHex()),
+        poolScript: new Bytes(toHex(poolScript)),
+        poolProof,
+        op: FT_AMM_POOL_OP.SWAP,
+        swapDirection: aToB ? 1 : 2,
+        oldTokenAScript: new Bytes(toHex(ftA.lockingScript.toBuffer())),
+        oldTokenBScript: new Bytes(toHex(ftB.lockingScript.toBuffer())),
+        oldLpScript: new Bytes(toHex(ftLp.lockingScript.toBuffer())),
+        proofA: TokenUtil.getTxOutputProof(poolTx, 1),
+        proofB: TokenUtil.getTxOutputProof(poolTx, 2),
+        proofLp: TokenUtil.getTxOutputProof(poolTx, 3),
+        userTokenScriptA: new Bytes(toHex(aToB ? ftU.lockingScript.toBuffer() : Buffer.alloc(0))),
+        userTokenScriptB: new Bytes(toHex(aToB ? Buffer.alloc(0) : ftU.lockingScript.toBuffer())),
+        userProofA: aToB ? TokenUtil.getTxOutputProof(new mvc.Transaction(userUtxo.txHex), userUtxo.outputIndex) : new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
+        userProofB: aToB ? new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }) : TokenUtil.getTxOutputProof(new mvc.Transaction(userUtxo.txHex), userUtxo.outputIndex),
+        amountAIn: aToB ? Number(amountIn.toString()) : 0,
+        amountBIn: aToB ? 0 : Number(amountIn.toString()),
+        userAddress: new Bytes(toHex(userAddrBuf)),
+        amountAOut: aToB ? 0 : Number(amountOut.toString()),
+        amountBOut: aToB ? Number(amountOut.toString()) : 0,
+        changeOutput: new Bytes(toHex(changeOutputBytes)),
+        poolSatoshis: 1,
+        reserveASatoshis: 1,
+        reserveBSatoshis: 1,
+        lpReserveSatoshis: 1,
+        userASatoshis: aToB ? 0 : 1,
+        userBSatoshis: aToB ? 1 : 0,
+        ...poolBacktraceArgs,
+      }
+      const poolCall = poolContract.unlock(poolUnlockArgs)
+      txComposer.getInput(poolInputIndex).setScript(poolCall.toScript() as mvc.Script)
+
+      // 3) 解锁 amountCheck
+      for (let i = 0; i < tokenCheckData.length; i++) {
+        const td = tokenCheckData[i]
+        const ucInputIndex = ucInputIndexes[i]
+        const ucUtxo = ucUtxos[i]
+        const out = txComposer.getTx().outputs[td.outputs[0].index]
+        let otherOutputArray = Buffer.alloc(0)
+        const tokenOutIndexes = td.outputs.map((o) => o.index)
+        txComposer.getTx().outputs.forEach((output, index) => {
+          if (!tokenOutIndexes.includes(index)) {
+            const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
+            otherOutputArray = Buffer.concat([otherOutputArray, getUInt32Buf(outputBuf.length), outputBuf])
+          }
+        })
+        const tokenOutputIndexArray = Buffer.alloc(td.outputs.length * 4)
+        td.outputs.forEach((o, j) => tokenOutputIndexArray.writeUInt32LE(o.index, j * 4))
+        const ucScript: any = ucUtxo.lockingScript
+        const ucPreimage = new SigHashPreimage(
+          toHex(getPreimage(txComposer.getTx(), ucScript.subScript(0), ucUtxo.satoshis, ucInputIndex))
+        )
+        const ucCall = checkContracts[i].contract.unlock({
+          txPreimage: ucPreimage,
+          prevouts: new Bytes(prevouts.toHex()),
+          tokenScript: new Bytes(toHex(td.ft.lockingScript.toBuffer())),
+          tokenTxHeaderArray: new Bytes(toHex(td.tokenTxHeaderArray)),
+          tokenTxHashProofArray: new Bytes(toHex(td.tokenTxHashProofArray)),
+          tokenSatoshiBytesArray: new Bytes(toHex(td.tokenSatoshiBytesArray)),
+          inputTokenAddressArray: new Bytes(toHex(td.inputTokenAddressArray)),
+          inputTokenAmountArray: new Bytes(toHex(td.inputTokenAmountArray)),
+          nOutputs: txComposer.getTx().outputs.length,
+          tokenOutputIndexArray: new Bytes(toHex(tokenOutputIndexArray)),
+          tokenOutputSatoshis: out.satoshis,
+          otherOutputArray: new Bytes(toHex(otherOutputArray)),
+        })
+        txComposer.getInput(ucInputIndex).setScript(ucCall.toScript() as mvc.Script)
+      }
+
+      // 4) SPACE fee
+      const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
+      if (!feeKey) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM swap: fee input needs feeWif or purse WIF.')
+      }
+      unlockP2PKHInputs(txComposer, [feeInputIndex], [feeKey])
+      checkFeeRate(txComposer, this.feeb)
+    }
+
+    return { txid: txComposer.getTxId(), txHex: txComposer.getRawHex() }
   }
 
   public async addLiquidity(_params: any): Promise<any> {

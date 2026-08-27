@@ -191,28 +191,47 @@ lpReserve + 流通 LP 总量 == lpTotalSupply          // C = S - lpReserve
 
 标准流程：genesis + 一次性 mint 固定总量 S，`allowIncreaseMints = false`。
 
-### 5.2 CREATE_POOL
+### 5.2 CREATE_POOL（两步：genesis + INIT）
 
-CREATE_POOL 是普通转账交易（不经过 FtAmmPool.unlock），业务层必须保证：
+CREATE_POOL 拆成两步，避免“池在 output 0 但 TokenTransferCheck 要求 token 输出从 output 0 开始”的协议冲突：
+
+**Tx0（genesis）**：只创建初始池 UTXO（genesisTxid = NULL），不创建储备。
 
 ```
 输入：
-  0: 创建者 FT-A（inA）
-  1: 创建者 FT-B（inB）
-  2: 创建者 LP-FT（S）
-  3: SPACE
-  4-6: TokenTransferCheck_A/B/LP
-
+  0: SPACE
 输出：
   0: 初始池 UTXO（标准 FT 数据，genesisTxid=0）
-  1: FT-A 储备（池地址, inA）
-  2: FT-B 储备（池地址, inB）
-  3: LP 储备（池地址, S - ΔL）
-  4: 创建者 LP-FT（ΔL）
+  1: SPACE 找零
+```
+
+**预锁**：创建者用普通 FT 转账把 FT-A/B/LP 锁入初始池地址 H0（各自独立 tx，TokenTransferCheck 可用）。
+
+**Tx1（INIT，第一次操作）**：消耗池 UTXO + 预锁的 FT-A/B/LP，锚定 genesisTxid = Tx0:0，初始化储备。
+
+```
+输入：
+  0: 初始池 UTXO（H0, genesisTxid=0）
+  1: 预锁 FT-A（H0, inA）
+  2: 预锁 FT-B（H0, inB）
+  3: 预锁 LP-FT（H0, S）
+  4: SPACE
+  5-7: TokenUnlockContractCheck_A/B/LP
+
+输出：
+  0: 新池 UTXO（H1, genesisTxid=Tx0:0）
+  1: FT-A 储备（H1, inA）
+  2: FT-B 储备（H1, inB）
+  3: LP 储备（H1, S - ΔL）
+  4: 创建者 LP-FT（H1 或创建者地址, ΔL）
   5: SPACE 找零
 ```
 
 初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`。
+
+> INIT（`isFirst`）放宽同 tx 绑定：储备来自预锁 tx（非池 genesis tx），
+> 靠 `tokenAddress == poolAddress + codehash/ID` 保证真实性。
+> INIT 之后 genesisTxid 固定，后续操作恢复“储备与池同 tx + outputIndex”强绑定。
 
 > 业务层责任：CREATE_POOL 必须在同一 tx 内按固定布局创建池 UTXO 与三枚储备 FT：`output 0 = 池`、`output 1 = FT-A`、`output 2 = FT-B`、`output 3 = LP`，且每枚储备 FT 恰好一个。
 
@@ -464,7 +483,7 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 |---|---|
 | `Token` / `token-v2` | 储备 FT / 用户 FT / LP 解锁 |
 | `TokenUnlockContractCheck` | FT-A/B/LP 守恒校验 |
-| `TokenTransferCheck` | CREATE_POOL 守恒校验 |
+| `TokenUnlockContractCheck` | INIT / ADD / REMOVE / SWAP 守恒校验 |
 | `TokenGenesis` | 池 UTXO 链式更新模式 |
 | `Backtrace` | 池 UTXO 回溯 |
 | `TokenProto` | FT 脚本解析/构造 |

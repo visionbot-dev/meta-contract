@@ -11,6 +11,7 @@ export enum FT_AMM_POOL_OP {
   SWAP = 1,
   ADD = 2,
   REMOVE = 3,
+  INIT = 4,
 }
 
 export type FtAmmPoolUnlockArgs = {

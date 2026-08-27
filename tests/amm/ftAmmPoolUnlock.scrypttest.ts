@@ -603,6 +603,121 @@ describe('FtAmmPool contract unlock (local scrypt test)', () => {
     expect(result.success, result.error).to.be.true
   })
 
+  it('INIT first operation should verify with pre-locked reserves', () => {
+    // T0：genesis 只创建池 UTXO（无储备）
+    const genesisPoolTx = new mvc.Transaction()
+    genesisPoolTx.version = 10
+    genesisPoolTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(poolScript), satoshis: SATOSHIS }))
+
+    // 创建者预锁 FT-A/B/LP 到池地址 H0（各自独立 tx）；LP 预锁总量 = lpTotalSupply = 1000
+    const preLockATx = new mvc.Transaction()
+    preLockATx.version = 10
+    preLockATx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(reserveAScript), satoshis: SATOSHIS }))
+    const preLockBTx = new mvc.Transaction()
+    preLockBTx.version = 10
+    preLockBTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(reserveBScript), satoshis: SATOSHIS }))
+    const preLockLpScript = ftProto.getNewTokenScript(lpReserveScript, poolAddress, new BN(1000))
+    const preLockLpTx = new mvc.Transaction()
+    preLockLpTx.version = 10
+    preLockLpTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(preLockLpScript), satoshis: SATOSHIS }))
+
+    // INIT：lpMint = min(1000, 1000) = 1000
+    const lpMint = 1000
+    const newLpReserve = 0
+    expect(ftProto.getTokenAmount(preLockLpScript).toString(), 'preLockLp amount').to.equal('1000')
+
+    const dataPart = ftProto.parseDataPart(poolScript)
+    dataPart.sensibleID = { txid: getSatotxId(genesisPoolTx), index: 0 }
+    const newPoolScript = ftProto.updateScript(poolScript, dataPart)
+    const newPoolAddress = TokenUtil.getScriptHashBuf(newPoolScript)
+
+    const tx = new mvc.Transaction()
+    tx.version = 10
+    tx.addInput(
+      new mvc.Transaction.Input({ prevTxId: getSatotxId(genesisPoolTx), outputIndex: 0, script: mvc.Script.empty() }),
+      mvc.Script.fromBuffer(poolScript),
+      SATOSHIS
+    )
+    tx.addInput(
+      new mvc.Transaction.Input({ prevTxId: getSatotxId(preLockATx), outputIndex: 0, script: mvc.Script.empty() }),
+      mvc.Script.fromBuffer(reserveAScript),
+      SATOSHIS
+    )
+    tx.addInput(
+      new mvc.Transaction.Input({ prevTxId: getSatotxId(preLockBTx), outputIndex: 0, script: mvc.Script.empty() }),
+      mvc.Script.fromBuffer(reserveBScript),
+      SATOSHIS
+    )
+    tx.addInput(
+      new mvc.Transaction.Input({ prevTxId: getSatotxId(preLockLpTx), outputIndex: 0, script: mvc.Script.empty() }),
+      mvc.Script.fromBuffer(preLockLpScript),
+      SATOSHIS
+    )
+
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(newPoolScript), satoshis: SATOSHIS }))
+    tx.addOutput(
+      new mvc.Transaction.Output({
+        script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveAScript, newPoolAddress, new BN(1000))),
+        satoshis: SATOSHIS,
+      })
+    )
+    tx.addOutput(
+      new mvc.Transaction.Output({
+        script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveBScript, newPoolAddress, new BN(1000))),
+        satoshis: SATOSHIS,
+      })
+    )
+    tx.addOutput(
+      new mvc.Transaction.Output({
+        script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(preLockLpScript, newPoolAddress, new BN(newLpReserve))),
+        satoshis: SATOSHIS,
+      })
+    )
+    tx.addOutput(
+      new mvc.Transaction.Output({
+        script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(preLockLpScript, USER_ADDRESS, new BN(lpMint))),
+        satoshis: SATOSHIS,
+      })
+    )
+
+    const prevouts = buildPrevouts(tx)
+    const preimage = getPreimage(
+      tx,
+      contractSubScript,
+      SATOSHIS,
+      0,
+      mvc.crypto.Signature.SIGHASH_ALL | mvc.crypto.Signature.SIGHASH_FORKID
+    )
+
+    const call = contract.unlock({
+      txPreimage: new SigHashPreimage(toHex(preimage)),
+      prevouts: new Bytes(toHex(prevouts)),
+      poolScript: new Bytes(toHex(poolScript)),
+      poolProof: createTxOutputProof(genesisPoolTx, 0),
+      op: FT_AMM_POOL_OP.INIT,
+      oldTokenAScript: new Bytes(toHex(reserveAScript)),
+      oldTokenBScript: new Bytes(toHex(reserveBScript)),
+      oldLpScript: new Bytes(toHex(preLockLpScript)),
+      proofA: createTxOutputProof(preLockATx, 0),
+      proofB: createTxOutputProof(preLockBTx, 0),
+      proofLp: createTxOutputProof(preLockLpTx, 0),
+      reserveAInputIndex: 1,
+      reserveBInputIndex: 2,
+      lpInputIndex: 3,
+      userAddress: new Bytes(toHex(USER_ADDRESS)),
+      lpMint,
+      changeOutput: new Bytes(''),
+      poolSatoshis: SATOSHIS,
+      reserveASatoshis: SATOSHIS,
+      reserveBSatoshis: SATOSHIS,
+      lpReserveSatoshis: SATOSHIS,
+      lpUserSatoshis: SATOSHIS,
+    })
+
+    const result = call.verify({ tx, inputIndex: 0, inputSatoshis: SATOSHIS })
+    expect(result.success, result.error).to.be.true
+  })
+
   it('SWAP A->B second operation should verify with Backtrace', () => {
     // ===== T1：首次操作（SWAP A->B），genesisTxid 锚定为 T0:0 =====
     const tx1 = new mvc.Transaction()

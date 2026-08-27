@@ -16,6 +16,8 @@ if (process.argv.includes('--bcp01')) {
   protocolName = 'mcp01'
 } else if (process.argv.includes('--mcp02')) {
   protocolName = 'mcp02'
+} else if (process.argv.includes('--amm')) {
+  protocolName = 'amm'
 }
 const contractScryptPath = join(__dirname, '../src/', protocolName, 'contract')
 const contractJsonPath = join(__dirname, '../src/', protocolName, 'contract-desc')

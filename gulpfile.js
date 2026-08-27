@@ -53,12 +53,37 @@ gulp.task('browserify', function () {
     .pipe(gulp.dest('dist'))
 })
 
+// AMM SDK 独立打包
+gulp.task('browserify-amm', function () {
+  tsProject.config.exclude = ''
+  return browserify({
+    basedir: '.',
+    debug: true,
+    entries: ['src/amm/index.ts'],
+    cache: {},
+    packageCache: {},
+  })
+    .plugin(tsify, tsProject.config)
+    .plugin(standalonify, { name: 'metaContractAmm' })
+    .bundle()
+    .pipe(source('metaContract.amm.min.js'))
+    .pipe(buffer())
+    .pipe(
+      sourcemaps.init({
+        loadMaps: true,
+      })
+    )
+    .pipe(uglify())
+    .pipe(sourcemaps.write('./'))
+    .pipe(gulp.dest('dist'))
+})
+
 function dev() {
   gulp.watch(['src/**/*.ts', 'src/**/*.d.ts'], gulp.series('tsc'))
   gulp.watch(['src/**/*.js'], gulp.series('tsc'))
 }
 
 // gulp.task("default", gulp.series("clean", "tsc", "copy_file", "browserify"));
-gulp.task('default', gulp.series('clean', 'tsc', 'copy_file', 'browserify'))
+gulp.task('default', gulp.series('clean', 'tsc', 'copy_file', 'browserify', 'browserify-amm'))
 // gulp.task("dev", gulp.series("clean", "tsc", "copy_file", "browserify", dev));
 gulp.task('dev', gulp.series('clean', 'tsc', 'copy_file', dev))

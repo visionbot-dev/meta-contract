@@ -12,6 +12,8 @@
     "compile-mcp01-dev": "node tools/compiler.js --mcp01  --debug",
     "compile-mcp02": "node tools/compiler.js --mcp02",
     "compile-mcp02-dev": "node tools/compiler.js --mcp02  --debug",
+    "compile-amm": "node tools/compiler.js --amm",
+    "compile-amm-dev": "node tools/compiler.js --amm --debug",
     "build": "npx gulp",
     "build:watch": "gulp dev",
     "rollup": "rollup --config"

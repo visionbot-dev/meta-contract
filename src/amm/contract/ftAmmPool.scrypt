@@ -1,7 +1,7 @@
-import "../token/tokenProto.scrypt";
-import "../protoheader.scrypt";
-import "../txUtil.scrypt";
-import "../backtrace.scrypt";
+import "../../mcp02/contract/token/tokenProto.scrypt";
+import "../../mcp02/contract/protoheader.scrypt";
+import "../../mcp02/contract/txUtil.scrypt";
+import "../../mcp02/contract/backtrace.scrypt";
 
 /**
  * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（v3.0）

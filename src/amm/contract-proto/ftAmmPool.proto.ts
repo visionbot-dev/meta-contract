@@ -1,5 +1,5 @@
 import * as BN from '../../bn.js'
-import * as ftProto from './token.proto'
+import * as ftProto from '../../mcp02/contract-proto/token.proto'
 
 export const PROTO_VERSION = 1
 export const PROTO_TYPE = 1 // 池 UTXO 伪装为 FT，现有索引器可找回

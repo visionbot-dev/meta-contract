@@ -4,15 +4,18 @@ import "../txUtil.scrypt";
 import "../backtrace.scrypt";
 
 /**
- * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（方案 A v2.0）
+ * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（v3.0）
  *
  * 设计要点：
- * - 池状态（reserveA/reserveB/lpReserve）写入池 UTXO data part 的"池子 Proto"段；
- * - 池 UTXO 末尾保留标准 MCP02 FT 数据（172 字节），tokenAddress 固定为官方地址，
- *   现有索引器可将其识别为普通 FT 并通过官方地址找回；
- * - 池 UTXO 采用 TokenGenesis 链式更新：genesisTxid 首次锚定 CREATE_POOL outpoint，
- *   后续每次操作通过 Backtrace.verify 回溯，防止伪造池 UTXO；
- * - 官方 tokenAddress 不可变，合约强制。
+ * - 池状态（reserveA/reserveB/lpReserve）不写入 data part，
+ *   由“与旧池 UTXO 同一笔交易创建、固定输出序号”的储备 FT 承载；
+ * - 储备 FT 必须与旧池同 tx（prevout txid 一致），且输出序号固定
+ *   （pool=0, reserveA=1, reserveB=2, lpReserve=3），
+ *   禁止第三方转入/捐赠 UTXO 参与；
+ * - 池 UTXO data part 只保留标准 MCP02 FT 数据（静态），tokenAddress
+ *   每次更新 input/output 一致，现有索引器可识别为普通 FT 找回；
+ * - 池 UTXO 采用 TokenGenesis 链式更新：genesisTxid 首次锚定
+ *   CREATE_POOL outpoint，后续每次操作通过 Backtrace.verify 回溯。
  */
 contract FtAmmPool {
     // 构造参数（不可变，写入 code part）
@@ -126,6 +129,14 @@ contract FtAmmPool {
         require(prevouts[reserveBInputIndex * TxUtil.OUTPOINT_LEN : reserveBInputIndex * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
         require(prevouts[lpInputIndex * TxUtil.OUTPOINT_LEN : lpInputIndex * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
 
+        // 固定输出布局：pool=0, reserveA=1, reserveB=2, lpReserve=3
+        // 只比 txid 不够：同一 tx 的 changeOutput 可能塞入池地址上的额外 FT，
+        // 必须同时绑定 prevout outputIndex，确保取到的是“规范储备输出”
+        require(SigHash.outpoint(txPreimage)[32 : 36] == b'00000000');
+        require(prevouts[reserveAInputIndex * TxUtil.OUTPOINT_LEN + 32 : (reserveAInputIndex + 1) * TxUtil.OUTPOINT_LEN] == b'01000000');
+        require(prevouts[reserveBInputIndex * TxUtil.OUTPOINT_LEN + 32 : (reserveBInputIndex + 1) * TxUtil.OUTPOINT_LEN] == b'02000000');
+        require(prevouts[lpInputIndex * TxUtil.OUTPOINT_LEN + 32 : (lpInputIndex + 1) * TxUtil.OUTPOINT_LEN] == b'03000000');
+
         int oldTokenAScriptLen = len(oldTokenAScript);
         int oldTokenBScriptLen = len(oldTokenBScript);
         int oldLpScriptLen = len(oldLpScript);
@@ -141,6 +152,7 @@ contract FtAmmPool {
         int reserveB_old = TokenProto.getTokenAmount(oldTokenBScript, oldTokenBScriptLen);
 
         require(TokenProto.getTokenID(oldLpScript, oldLpScriptLen) == this.lpTokenID);
+        require(TokenProto.getScriptCodeHash(oldLpScript, oldLpScriptLen) == this.lpTokenCodeHash);
         require(TokenProto.getTokenAddress(oldLpScript, oldLpScriptLen) == poolAddress);
         int lpReserve_old = TokenProto.getTokenAmount(oldLpScript, oldLpScriptLen);
 
@@ -165,15 +177,19 @@ contract FtAmmPool {
             int effectiveInA = amountAIn * (10000 - this.feeBps) / 10000;
             require(effectiveInA > 0);
 
+            // 输出必须严格等于恒定乘积公式（不允许低于公允值）
+            int outBCalc = reserveB_old * effectiveInA / (reserveA_old + effectiveInA);
+            require(outBCalc == amountBOut);
+
             newReserveA = reserveA_old + amountAIn;
             newReserveB = reserveB_old - amountBOut;
             require(newReserveB > 0);
             require((reserveA_old + effectiveInA) * newReserveB >= reserveA_old * reserveB_old);
 
-            // 用户 FT-B 输出
+            // 用户 FT-B 输出（模板必须是 FT-B，不能用 FT-A）
             bytes userBScript = TokenProto.getNewTokenScript(
-                userTokenScriptA,
-                userTokenScriptALen,
+                oldTokenBScript,
+                oldTokenBScriptLen,
                 userAddress,
                 amountBOut
             );
@@ -291,6 +307,13 @@ contract FtAmmPool {
         outputs += Utils.buildOutput(newLpReserveScript, lpReserveSatoshis);
         outputs += userOutput;
         outputs += changeOutput;
+
+        // changeOutput 必须为空或标准 P2PKH（25B script + 8B satoshis），
+        // 防止同 tx 的 change 里塞入“池地址上的额外 FT 输出”破坏储备唯一性
+        require(
+            len(changeOutput) == 0 ||
+            (len(changeOutput) == 33 && changeOutput[:3] == b'76a914' && changeOutput[23 : 25] == b'88ac')
+        );
 
         require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
         require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));

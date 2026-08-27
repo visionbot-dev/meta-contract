@@ -147,7 +147,23 @@
 - FT-B 储备：`tokenAddress = 池地址`，`tokenAmount = reserveB`；
 - LP 储备：`tokenAddress = 池地址`，`tokenAmount = lpReserve`。
 
-**关键约束：三枚储备 FT 必须与当前池 UTXO 在同一笔交易中创建（prevout txid 相同）。**
+**关键约束（同 tx + 固定输出序号）：**
+
+```
+T_old 输出布局：
+  output 0 = 池 UTXO
+  output 1 = FT-A 储备
+  output 2 = FT-B 储备
+  output 3 = LP 储备
+  output 4+ = 用户输出 / change
+```
+
+储备 FT 必须同时满足：
+
+1. `prevout txid == 池 UTXO 的 prevout txid`（同 tx）；
+2. `prevout outputIndex == 1 / 2 / 3`（固定序号）。
+
+只比 txid 不够：同一 tx 的 changeOutput 可能塞入池地址上的额外 FT，必须绑定输出序号，确保取到的是规范储备。
 
 ### 4.3 用户侧 LP-FT
 
@@ -159,6 +175,8 @@
 reserveA * reserveB >= k_initial
 lpReserve + 流通 LP 总量 == lpTotalSupply
 储备 FT 的 prevout txid == 当前池 UTXO 的 prevout txid   // 同 tx 绑定
+储备 FT 的 prevout outputIndex == 1/2/3                  // 固定输出序号
+changeOutput 为空或标准 P2PKH                            // 防额外 FT 输出
 储备 FT 的 tokenAddress == 池地址
 池 UTXO 的 tokenAddress 每次更新保持不变（input == output）
 池 UTXO 的 genesisTxid 链式锚定 CREATE_POOL
@@ -196,7 +214,7 @@ CREATE_POOL 是普通转账交易（不经过 FtAmmPool.unlock），业务层必
 
 初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`。
 
-> 业务层责任：CREATE_POOL 必须在同一 tx 内创建池 UTXO 与三枚储备 FT，且每枚储备 FT 恰好一个。
+> 业务层责任：CREATE_POOL 必须在同一 tx 内按固定布局创建池 UTXO 与三枚储备 FT：`output 0 = 池`、`output 1 = FT-A`、`output 2 = FT-B`、`output 3 = LP`，且每枚储备 FT 恰好一个。
 
 ---
 
@@ -307,20 +325,26 @@ if (genesisTxid == NULL_GENESIS_TXID) {
 bytes poolAddress = hash160(poolScript);
 bytes poolTxid = SigHash.outpoint(txPreimage)[:32];
 
-// 储备 FT 输入真实性 + 同 tx 绑定 + 读金额
+// 储备 FT 输入真实性 + 同 tx 绑定 + 固定输出序号 + 读金额
 TxUtil.verifyTxOutput(proofA, prevouts[reserveAInputIndex]);
 TxUtil.verifyTxOutput(proofB, prevouts[reserveBInputIndex]);
 TxUtil.verifyTxOutput(proofLp, prevouts[lpInputIndex]);
 require(prevouts[reserveAInputIndex][:32] == poolTxid);   // 必须与旧池同 tx
 require(prevouts[reserveBInputIndex][:32] == poolTxid);
 require(prevouts[lpInputIndex][:32] == poolTxid);
+require(SigHash.outpoint(txPreimage)[32:36] == b'00000000');   // 池 = output 0
+require(prevouts[reserveAInputIndex][32:36] == b'01000000');   // A = output 1
+require(prevouts[reserveBInputIndex][32:36] == b'02000000');   // B = output 2
+require(prevouts[lpInputIndex][32:36] == b'03000000');         // LP = output 3
 
 require(TokenProto.getTokenID(oldTokenAScript) == tokenAID);
+require(TokenProto.getScriptCodeHash(oldTokenAScript) == tokenACodeHash);
 require(TokenProto.getTokenAddress(oldTokenAScript) == poolAddress);
 int reserveA_old = TokenProto.getTokenAmount(oldTokenAScript);
-// B / LP 同理
+// B / LP 同理（LP 也校验 codeHash）
 
 // AMM 逻辑（SWAP/ADD/REMOVE）
+// SWAP 额外要求 outBCalc == amountBOut（严格等于公式）
 // ... 计算 newReserveA/newReserveB/newLpReserve
 require(newReserveA >= this.minReserve);
 require(newReserveB >= this.minReserve);
@@ -334,13 +358,14 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 
 ### 7.3 关键设计点
 
-1. **同 tx 绑定**：储备 FT 的 prevout txid 必须等于旧池 UTXO 的 prevout txid，第三方转入/捐赠 UTXO 无法参与；
+1. **同 tx + 固定序号绑定**：储备 FT 的 prevout txid 必须等于旧池 UTXO 的 prevout txid，且 outputIndex 固定为 1/2/3；第三方转入/捐赠 UTXO 无法参与；
 2. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
 3. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
 4. **tokenAddress 不变**：input/output 一致；
 5. **标准 FT 数据在末尾**：现有索引器可找回；
-6. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
-7. **最小储备只校验新状态（M1）**。
+6. **changeOutput 校验**：只能为空或标准 P2PKH，防止同 tx 塞入池地址额外 FT；
+7. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
+8. **最小储备只校验新状态（M1）**。
 
 ---
 
@@ -410,10 +435,11 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 ### 10.1 资产安全
 
 1. FT 守恒双保险：amountCheck + hashOutputs；
-2. **同 tx 绑定**：储备 FT 必须与旧池同 tx，捐赠/第三方转入 UTXO 不能参与；
-3. **池 UTXO 链防伪造**：Backtrace；
-4. **池 tokenAddress 不变**：input/output 一致；
-5. H1 / L2。
+2. **同 tx + 固定序号绑定**：储备 FT 必须与旧池同 tx 且 outputIndex=1/2/3，捐赠/第三方转入 UTXO 不能参与；
+3. **changeOutput 校验**：只能为空或 P2PKH，不能塞入池地址上的额外 FT；
+4. **池 UTXO 链防伪造**：Backtrace；
+5. **池 tokenAddress 不变**：input/output 一致；
+6. H1 / L2。
 
 ### 10.2 经济安全
 
@@ -461,8 +487,8 @@ genesisHash/genesisTxid = 池链标识
 
 1. 找到当前池 UTXO；
 2. 取它的创建 tx（`txid` 即池 UTXO 的 prevout txid）；
-3. 在该 tx 输出中找池地址下的 FT-A/B/LP，读 `tokenAmount`；
-4. 得到 `reserveA/reserveB/lpReserve`。
+3. 在该 tx 输出中按固定布局取：`output 1 = FT-A`、`output 2 = FT-B`、`output 3 = LP`；
+4. 读各自 `tokenAmount` 得到 `reserveA/reserveB/lpReserve`。
 
 也可以直接用索引器：
 
@@ -483,7 +509,11 @@ genesisHash/genesisTxid = 池链标识
 | 场景 | 合约行为 |
 |---|---|
 | 储备 FT 与旧池不同 tx | 拒绝（同 tx 绑定） |
+| 储备 FT outputIndex != 1/2/3 | 拒绝（固定输出序号） |
+| changeOutput 非空且非 P2PKH | 拒绝（防额外 FT 输出） |
 | 储备 FT 地址 != 池地址 | 拒绝 |
+| 储备 FT codeHash/tokenID 不匹配 | 拒绝 |
+| SWAP amountBOut != 公式值 | 拒绝 |
 | 新状态 `reserveA_new/B_new < minReserve` | 拒绝（M1） |
 | 用户输入 tokenAddress == 池地址 | 拒绝（H1） |
 | 用户输出地址 != 输入 owner | 拒绝（L2） |

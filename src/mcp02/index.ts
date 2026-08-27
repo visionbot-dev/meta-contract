@@ -263,7 +263,7 @@ export class FtManager {
   protected dustCalculator?: DustCalculator
   transferCheckCodeHashArray: Bytes[]
   unlockContractCodeHashArray: Bytes[]
-  private debug: boolean
+  protected debug: boolean
   private signer?: ISigner
 
   constructor({

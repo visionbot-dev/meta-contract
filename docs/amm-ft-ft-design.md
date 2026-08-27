@@ -191,49 +191,50 @@ lpReserve + 流通 LP 总量 == lpTotalSupply          // C = S - lpReserve
 
 标准流程：genesis + 一次性 mint 固定总量 S，`allowIncreaseMints = false`。
 
-### 5.2 CREATE_POOL（两步：genesis + INIT）
+### 5.2 CREATE_POOL（PoolGenesis → issue）
 
-CREATE_POOL 拆成两步，避免“池在 output 0 但 TokenTransferCheck 要求 token 输出从 output 0 开始”的协议冲突：
+模仿 MCP02 FT 的 genesis/issue 模型：先部署 `FtAmmPoolGenesis`，创建者预锁 FT-A/B/LP 到 genesis 地址，再由 genesis issue 出正式 `FtAmmPool` + 储备。FtAmmPool 自身无首次特判。
 
-**Tx0（genesis）**：只创建初始池 UTXO（genesisTxid = NULL），不创建储备。
+**Tx0（deploy genesis）**：创建 PoolGenesis UTXO（data part 携带池 FT 元数据）。
 
 ```
 输入：
   0: SPACE
 输出：
-  0: 初始池 UTXO（标准 FT 数据，genesisTxid=0）
+  0: PoolGenesis UTXO（H_G）
   1: SPACE 找零
 ```
 
-**预锁**：创建者用普通 FT 转账把 FT-A/B/LP 锁入初始池地址 H0（各自独立 tx，TokenTransferCheck 可用）。
+**预锁**：创建者用普通 FT 转账把 FT-A/B/LP 锁入 PoolGenesis 地址 H_G（各自独立 tx，TokenTransferCheck 可用）。
 
-**Tx1（INIT，第一次操作）**：消耗池 UTXO + 预锁的 FT-A/B/LP，锚定 genesisTxid = Tx0:0，初始化储备。
+**Tx1（issue）**：PoolGenesis 消费自己 + 预锁的 FT-A/B/LP，产出正式池。
 
 ```
 输入：
-  0: 初始池 UTXO（H0, genesisTxid=0）
-  1: 预锁 FT-A（H0, inA）
-  2: 预锁 FT-B（H0, inB）
-  3: 预锁 LP-FT（H0, S）
+  0: PoolGenesis UTXO（H_G）
+  1: 预锁 FT-A（H_G, inA）
+  2: 预锁 FT-B（H_G, inB）
+  3: 预锁 LP-FT（H_G, lpLocked）
   4: SPACE
   5-7: TokenUnlockContractCheck_A/B/LP
 
 输出：
-  0: 新池 UTXO（H1, genesisTxid=Tx0:0）
+  0: 正式池 UTXO（H1, genesisTxid = Tx0:0）
   1: FT-A 储备（H1, inA）
   2: FT-B 储备（H1, inB）
-  3: LP 储备（H1, S - ΔL）
+  3: LP 储备（H1, lpLocked - ΔL）
   4: 创建者 LP-FT（H1 或创建者地址, ΔL）
   5: SPACE 找零
 ```
 
-初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`。
+初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`、`lpLocked <= S`。
 
-> INIT（`isFirst`）放宽同 tx 绑定：储备来自预锁 tx（非池 genesis tx），
-> 靠 `tokenAddress == poolAddress + codehash/ID` 保证真实性。
-> INIT 之后 genesisTxid 固定，后续操作恢复“储备与池同 tx + outputIndex”强绑定。
+> issue 是唯一允许“储备来自预锁 tx”的步骤；PoolGenesis 校验预锁 FT 的
+> `tokenAddress == genesisAddress + codehash/ID` 保证真实性。
+> issue 后正式池的 genesisTxid 固定，FtAmmPool 所有操作都要求
+> “储备与池同 tx + outputIndex”强绑定。
 
-> 业务层责任：CREATE_POOL 必须在同一 tx 内按固定布局创建池 UTXO 与三枚储备 FT：`output 0 = 池`、`output 1 = FT-A`、`output 2 = FT-B`、`output 3 = LP`，且每枚储备 FT 恰好一个。
+> 业务层责任：issue tx 必须按固定布局创建正式池 UTXO 与三枚储备 FT：`output 0 = 池`、`output 1 = FT-A`、`output 2 = FT-B`、`output 3 = LP`，且每枚储备 FT 恰好一个。
 
 ---
 
@@ -471,7 +472,7 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 
 - 每次操作恰好一个旧池输入 + 一个新池输出；
 - **输入布局固定**：`0=旧池, 1/2/3=FT-A/B/LP 储备, 4=用户输入, 5=ADD B`，合约不再接受 inputIndex 参数；
-- 储备 FT 必须与池 UTXO 同 tx（合约强制，INIT 首次操作除外）；
+- 储备 FT 必须与池 UTXO 同 tx（合约强制，唯一例外是 PoolGenesis issue 的预锁）；
 - 所有交易 SIGHASH_ALL；
 - 池内 FT 只能由当前池合约解锁；
 - 用户输入非池地址（H1）、输出绑定 owner（L2）。

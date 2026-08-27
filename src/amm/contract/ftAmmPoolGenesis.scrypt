@@ -1,0 +1,147 @@
+import "../../mcp02/contract/token/tokenProto.scrypt";
+import "../../mcp02/contract/protoheader.scrypt";
+import "../../mcp02/contract/txUtil.scrypt";
+
+/**
+ * FtAmmPoolGenesis：AMM 池的 genesis（模仿 MCP02 TokenGenesis → issue）
+ *
+ * 流程：
+ * 1. Tx0：创建 PoolGenesis UTXO（data part 携带池 FT 元数据）；
+ * 2. 创建者把 FT-A/B/LP 预锁到 PoolGenesis 地址（H_G）；
+ * 3. Tx1（issue）：PoolGenesis 消费自己 + 预锁的 FT-A/B/LP，
+ *    产出正式 FtAmmPool UTXO（genesisTxid = PoolGenesis outpoint）
+ *    + 三枚储备 FT + 创建者 LP。
+ *
+ * 之后 FtAmmPool 的所有操作都是普通操作（无 isFirst 特判）。
+ */
+contract FtAmmPoolGenesis {
+    // 与 FtAmmPool 相同的 code part 参数（保证 issue 出的池合约参数一致）
+    bytes tokenACodeHash;
+    bytes tokenAID;
+    bytes tokenBCodeHash;
+    bytes tokenBID;
+    bytes lpTokenCodeHash;
+    bytes lpTokenID;
+    int lpTotalSupply;
+    int minReserve;
+    int feeBps;
+    // 期望的 FtAmmPool code part hash（防 issue 出非预期池代码）
+    bytes poolCodeHash;
+
+    // 固定输入布局：0=本 genesis, 1/2/3=预锁 FT-A/B/LP
+    static const int GENESIS_INPUT_INDEX = 0;
+    static const int LOCKED_A_INPUT_INDEX = 1;
+    static const int LOCKED_B_INPUT_INDEX = 2;
+    static const int LOCKED_LP_INPUT_INDEX = 3;
+
+    static const int INT_MAX = 9223372036854775807;
+
+    static function mul(int a, int b) : int {
+        require(a == 0 || b <= INT_MAX / a);
+        return a * b;
+    }
+
+    static function add(int a, int b) : int {
+        require(a <= INT_MAX - b);
+        return a + b;
+    }
+
+    // 校验一枚预锁 FT：真实性 + ID/codehash/address == genesisAddress，返回金额
+    static function readLocked(
+        bytes script,
+        TxOutputProof proof,
+        bytes tokenID,
+        bytes tokenCodeHash,
+        bytes genesisAddress,
+        bytes prevouts,
+        int inputIndex
+    ) : int {
+        TxUtil.verifyTxOutput(proof, prevouts[inputIndex * TxUtil.OUTPOINT_LEN : (inputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+        require(sha256(script) == proof.scriptHash);
+        int scriptLen = len(script);
+        require(TokenProto.getTokenID(script, scriptLen) == tokenID);
+        require(TokenProto.getScriptCodeHash(script, scriptLen) == tokenCodeHash);
+        require(TokenProto.getTokenAddress(script, scriptLen) == genesisAddress);
+        return TokenProto.getTokenAmount(script, scriptLen);
+    }
+
+    public function unlock(
+        SigHashPreimage txPreimage,
+        bytes prevouts,
+        bytes genesisScript,
+        TxOutputProof genesisProof,
+        bytes poolScript,
+        // 预锁储备输入（输入序号固定 1/2/3）
+        bytes lockedTokenAScript,
+        bytes lockedTokenBScript,
+        bytes lockedLpScript,
+        TxOutputProof proofA,
+        TxOutputProof proofB,
+        TxOutputProof proofLp,
+        bytes userAddress,
+        int lpMint,
+        int poolSatoshis,
+        int reserveASatoshis,
+        int reserveBSatoshis,
+        int lpReserveSatoshis,
+        int lpUserSatoshis,
+        bytes changeOutput
+    ) {
+        require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
+
+        bytes thisOutpoint = SigHash.outpoint(txPreimage);
+        TxUtil.verifyTxOutput(genesisProof, thisOutpoint);
+        require(sha256(genesisScript) == genesisProof.scriptHash);
+        bytes genesisAddress = hash160(genesisScript);
+
+        // 预锁储备读金额
+        int inA = readLocked(lockedTokenAScript, proofA, this.tokenAID, this.tokenACodeHash, genesisAddress, prevouts, LOCKED_A_INPUT_INDEX);
+        int inB = readLocked(lockedTokenBScript, proofB, this.tokenBID, this.tokenBCodeHash, genesisAddress, prevouts, LOCKED_B_INPUT_INDEX);
+        int lpLocked = readLocked(lockedLpScript, proofLp, this.lpTokenID, this.lpTokenCodeHash, genesisAddress, prevouts, LOCKED_LP_INPUT_INDEX);
+
+        require(inA >= this.minReserve);
+        require(inB >= this.minReserve);
+        require(lpLocked > 0);
+        require(lpLocked <= this.lpTotalSupply);
+
+        // 初始 LP：ΔL = min(inA, inB)，池内保留 lpLocked - ΔL
+        int lpMintCalc = inA;
+        if (inB < lpMintCalc) {
+            lpMintCalc = inB;
+        }
+        require(lpMintCalc > 0);
+        require(lpMintCalc == lpMint);
+        require(lpMintCalc <= lpLocked);
+        int newLpReserve = lpLocked - lpMintCalc;
+
+        // 新池脚本必须是指定的 FtAmmPool 代码 + genesisTxid = PoolGenesis outpoint
+        int poolScriptLen = len(poolScript);
+        require(hash160(TokenProto.getScriptCode(poolScript, poolScriptLen)) == this.poolCodeHash);
+        bytes newPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, thisOutpoint);
+        bytes newPoolAddress = hash160(newPoolScript);
+
+        // 输出布局：pool(0), reserveA(1), reserveB(2), lpReserve(3), userLP(4), change
+        bytes outputs = b'';
+        outputs += Utils.buildOutput(newPoolScript, poolSatoshis);
+
+        int lockedTokenAScriptLen = len(lockedTokenAScript);
+        int lockedTokenBScriptLen = len(lockedTokenBScript);
+        int lockedLpScriptLen = len(lockedLpScript);
+
+        bytes newReserveAScript = TokenProto.getNewTokenScript(lockedTokenAScript, lockedTokenAScriptLen, newPoolAddress, inA);
+        bytes newReserveBScript = TokenProto.getNewTokenScript(lockedTokenBScript, lockedTokenBScriptLen, newPoolAddress, inB);
+        bytes newLpReserveScript = TokenProto.getNewTokenScript(lockedLpScript, lockedLpScriptLen, newPoolAddress, newLpReserve);
+
+        outputs += Utils.buildOutput(newReserveAScript, reserveASatoshis);
+        outputs += Utils.buildOutput(newReserveBScript, reserveBSatoshis);
+        outputs += Utils.buildOutput(newLpReserveScript, lpReserveSatoshis);
+
+        bytes userLpScript = TokenProto.getNewTokenScript(lockedLpScript, lockedLpScriptLen, userAddress, lpMintCalc);
+        outputs += Utils.buildOutput(userLpScript, lpUserSatoshis);
+
+        outputs += changeOutput;
+
+        require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
+        require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
+    }
+}

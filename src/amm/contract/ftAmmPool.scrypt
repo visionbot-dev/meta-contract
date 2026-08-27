@@ -4,18 +4,19 @@ import "../../mcp02/contract/txUtil.scrypt";
 import "../../mcp02/contract/backtrace.scrypt";
 
 /**
- * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（v3.1 简化版）
+ * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（v4.0，由 PoolGenesis issue 创建）
  *
  * 设计要点：
+ * - 池由 `FtAmmPoolGenesis` 一次性 issue 产生（genesisTxid = PoolGenesis outpoint），
+ *   之后所有操作都是普通操作：无首次特判、无 OP_INIT；
  * - 池状态（reserveA/reserveB/lpReserve）不写入 data part，
  *   由“与旧池 UTXO 同一笔交易创建、固定输出序号”的储备 FT 承载；
  * - 交易输入布局固定：0=旧池, 1/2/3=FT-A/B/LP 储备, 4=用户输入,
  *   5=ADD 的第二个用户输入；不再暴露 inputIndex 参数；
- * - 首次 INIT 放宽同 tx 绑定（储备来自创建者预锁），其余操作强绑定；
+ * - 储备 FT 必须与旧池同 tx（prevout txid + outputIndex 强绑定）；
  * - 池 UTXO data part 只保留标准 MCP02 FT 数据（静态），tokenAddress
  *   每次更新 input/output 一致，现有索引器可识别为普通 FT 找回；
- * - 池 UTXO 采用 TokenGenesis 链式更新：genesisTxid 首次锚定
- *   CREATE_POOL outpoint，后续每次操作通过 Backtrace.verify 回溯。
+ * - 池 UTXO 采用 TokenGenesis 链式更新：每次操作通过 Backtrace.verify 回溯。
  */
 contract FtAmmPool {
     // 构造参数（不可变，写入 code part）
@@ -31,7 +32,6 @@ contract FtAmmPool {
     static const int OP_SWAP = 1;
     static const int OP_ADD = 2;
     static const int OP_REMOVE = 3;
-    static const int OP_INIT = 4;
     static const int SWAP_A_TO_B = 1;
     static const int SWAP_B_TO_A = 2;
 
@@ -181,13 +181,9 @@ contract FtAmmPool {
         bytes poolTokenAddress = TokenProto.getTokenAddress(poolScript, poolScriptLen);
 
         // ========== TokenGenesis 链式更新 ==========
+        // 池必须由 PoolGenesis issue 创建，genesisTxid 恒非 NULL（= PoolGenesis outpoint）
         bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
-        bool isFirst = false;
-        if (genesisTxid == ProtoHeader.NULL_GENESIS_TXID) {
-            isFirst = true;
-            genesisTxid = thisOutpoint;
-        }
-        if (!isFirst) {
+        {
             bytes prevScriptHash = sha256(poolScript);
             TxOutputProof prevPoolTxProof = {
                 prevPoolTxHeader,
@@ -213,10 +209,8 @@ contract FtAmmPool {
         int reserveB_old = readReserve(oldTokenBScript, proofB, this.tokenBID, this.tokenBCodeHash, poolAddress, prevouts, RESERVE_B_INPUT_INDEX);
         int lpReserve_old = readReserve(oldLpScript, proofLp, this.lpTokenID, this.lpTokenCodeHash, poolAddress, prevouts, LP_INPUT_INDEX);
 
-        // 储备 FT 必须来自创建旧池 UTXO 的同一笔交易（禁止第三方转入/捐赠 UTXO 参与）。
-        // 例外：首次 INIT（genesisTxid == NULL）时，创建者已提前把 FT-A/B/LP 锁入池地址，
-        //       此时不要求同 tx，改由“tokenAddress == poolAddress + codehash/ID”保证真实性。
-        if (!isFirst) {
+        // 储备 FT 必须来自创建旧池 UTXO 的同一笔交易（禁止第三方转入/捐赠 UTXO 参与）
+        {
             require(prevouts[RESERVE_A_INPUT_INDEX * TxUtil.OUTPOINT_LEN : RESERVE_A_INPUT_INDEX * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
             require(prevouts[RESERVE_B_INPUT_INDEX * TxUtil.OUTPOINT_LEN : RESERVE_B_INPUT_INDEX * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
             require(prevouts[LP_INPUT_INDEX * TxUtil.OUTPOINT_LEN : LP_INPUT_INDEX * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
@@ -312,36 +306,6 @@ contract FtAmmPool {
                 newReserveA = newReserveOut;
                 newReserveB = newReserveIn;
             }
-        }
-        else if (op == OP_INIT) {
-            // 首次初始化：创建者已提前把 FT-A/B/LP 全部锁入池地址（H0）
-            // - reserveA_old / reserveB_old / lpReserve_old 就是预锁金额
-            // - LP 总量 S 全部预锁，初始化后拆分：池内保留 S-ΔL，创建者拿回 ΔL
-            require(isFirst);
-            require(reserveA_old > 0);
-            require(reserveB_old > 0);
-            require(lpReserve_old == this.lpTotalSupply);
-
-            int lpMintCalc = reserveA_old;
-            if (reserveB_old < lpMintCalc) {
-                lpMintCalc = reserveB_old;
-            }
-            require(lpMintCalc > 0);
-            require(lpMintCalc == lpMint);
-            require(lpMintCalc <= lpReserve_old);
-
-            newReserveA = reserveA_old;
-            newReserveB = reserveB_old;
-            newLpReserve = lpReserve_old - lpMintCalc;
-
-            // 创建者 LP 输出
-            bytes userLpScript = TokenProto.getNewTokenScript(
-                oldLpScript,
-                oldLpScriptLen,
-                userAddress,
-                lpMintCalc
-            );
-            userOutput = Utils.buildOutput(userLpScript, lpUserSatoshis);
         }
         else if (op == OP_ADD) {
             // 用户 FT-A（输入 4）/ FT-B（输入 5）校验

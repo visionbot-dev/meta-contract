@@ -14,6 +14,8 @@ export { FtAmmPoolFactory, FtAmmPool, FT_AMM_POOL_OP } from './contract-factory/
 export type { FtAmmPoolUnlockArgs } from './contract-factory/ftAmmPool'
 export { FtAmmPoolGenesisFactory, FtAmmPoolGenesis } from './contract-factory/ftAmmPoolGenesis'
 export type { FtAmmPoolGenesisUnlockArgs } from './contract-factory/ftAmmPoolGenesis'
+export { FtAmmPoolManager } from './manager'
+export type { DeployGenesisResult, PreLockReserveParams, IssuePoolParams, IssuePoolResult } from './manager'
 export * as ftAmmPoolProto from './contract-proto/ftAmmPool.proto'
 export * from './math'
 export * from './types'

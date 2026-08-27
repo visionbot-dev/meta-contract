@@ -256,7 +256,7 @@ export type FtUtxo = {
 }
 
 export class FtManager {
-  private network: API_NET
+  protected network: API_NET
   protected zeroAddress: mvc.Address
   private purse: Purse
   protected feeb: number
@@ -844,7 +844,7 @@ export class FtManager {
    * 解锁 P2PKH 输入：优先使用本地私钥，其次使用 Metalet/signer。
    * 支持 swap 系列接口在 signer 模式下 feeUtxos 不带 wif。
    */
-  private async _unlockP2PKHInputs(
+  protected async _unlockP2PKHInputs(
     txComposer: TxComposer,
     inputIndexes: number[],
     utxoPrivateKeys: mvc.PrivateKey[]
@@ -3495,7 +3495,7 @@ export class FtManager {
    * @param genesis genesis of token
    * @private
    */
-  private async perfectFtUtxosInfo(ftUtxos: FtUtxo[], genesis: string): Promise<FtUtxo[]> {
+  protected async perfectFtUtxosInfo(ftUtxos: FtUtxo[], genesis: string): Promise<FtUtxo[]> {
     // ⚠️ 本 SDK 不做链上查询：每个 ftUtxo 必须由外部传入并自带 txHex / preTxHex
     const cachedHexs: {
       [txid: string]: { hex?: string }

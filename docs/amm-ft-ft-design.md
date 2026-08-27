@@ -470,7 +470,8 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 ### 8.4 通用约束
 
 - 每次操作恰好一个旧池输入 + 一个新池输出；
-- 储备 FT 必须与池 UTXO 同 tx（合约强制）；
+- **输入布局固定**：`0=旧池, 1/2/3=FT-A/B/LP 储备, 4=用户输入, 5=ADD B`，合约不再接受 inputIndex 参数；
+- 储备 FT 必须与池 UTXO 同 tx（合约强制，INIT 首次操作除外）；
 - 所有交易 SIGHASH_ALL；
 - 池内 FT 只能由当前池合约解锁；
 - 用户输入非池地址（H1）、输出绑定 owner（L2）。

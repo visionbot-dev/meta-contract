@@ -21,23 +21,18 @@ export type FtAmmPoolUnlockArgs = {
   poolProof: any
   op: FT_AMM_POOL_OP
   swapDirection?: number
-  // 池内储备 FT 输入
+  // 池内储备 FT 输入（输入序号固定 1/2/3，不再传 index）
   oldTokenAScript: Bytes
   oldTokenBScript: Bytes
   oldLpScript: Bytes
   proofA: any
   proofB: any
   proofLp: any
-  reserveAInputIndex: number
-  reserveBInputIndex: number
-  lpInputIndex: number
   // 用户输入
   userTokenScriptA?: Bytes
   userTokenScriptB?: Bytes
   userProofA?: any
   userProofB?: any
-  userInputIndexA?: number
-  userInputIndexB?: number
   amountAIn?: number
   amountBIn?: number
   userAddress?: Bytes
@@ -48,7 +43,6 @@ export type FtAmmPoolUnlockArgs = {
   lpReturn?: number
   changeOutput: Bytes
   // remove 用
-  lpReturnInputIndex?: number
   oldLpUserScript?: Bytes
   lpUserProof?: any
   // 输出 satoshis
@@ -128,8 +122,6 @@ export class FtAmmPool extends ContractAdapter {
       userTokenScriptB: new Bytes(''),
       userProofA: new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
       userProofB: new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
-      userInputIndexA: 0,
-      userInputIndexB: 0,
       amountAIn: 0,
       amountBIn: 0,
       userAddress: new Bytes(''),
@@ -137,7 +129,6 @@ export class FtAmmPool extends ContractAdapter {
       amountBOut: 0,
       lpMint: 0,
       lpReturn: 0,
-      lpReturnInputIndex: 0,
       oldLpUserScript: new Bytes(''),
       lpUserProof: new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
       userASatoshis: 0,
@@ -165,15 +156,10 @@ export class FtAmmPool extends ContractAdapter {
       wrapProof(opts.proofA, TxOutputProof),
       wrapProof(opts.proofB, TxOutputProof),
       wrapProof(opts.proofLp, TxOutputProof),
-      opts.reserveAInputIndex,
-      opts.reserveBInputIndex,
-      opts.lpInputIndex,
       opts.userTokenScriptA,
       opts.userTokenScriptB,
       wrapProof(opts.userProofA, TxOutputProof),
       wrapProof(opts.userProofB, TxOutputProof),
-      opts.userInputIndexA,
-      opts.userInputIndexB,
       opts.amountAIn,
       opts.amountBIn,
       opts.userAddress,
@@ -182,7 +168,6 @@ export class FtAmmPool extends ContractAdapter {
       opts.lpMint,
       opts.lpReturn,
       opts.changeOutput,
-      opts.lpReturnInputIndex,
       opts.oldLpUserScript,
       wrapProof(opts.lpUserProof, TxOutputProof),
       opts.poolSatoshis,

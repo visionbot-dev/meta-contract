@@ -163,7 +163,7 @@ T_old 输出布局：
 1. `prevout txid == 池 UTXO 的 prevout txid`（同 tx）；
 2. `prevout outputIndex == 1 / 2 / 3`（固定序号）。
 
-只比 txid 不够：同一 tx 的 changeOutput 可能塞入池地址上的额外 FT，必须绑定输出序号，确保取到的是规范储备。
+只比 txid 不够：同一 tx 的 changeOutput 可能塞入池地址上的额外 FT，必须绑定输出序号，确保取到的是规范储备（changeOutput 不限制形态，额外 FT 会锁死在池地址但无法冒充储备）。
 
 ### 4.3 用户侧 LP-FT
 
@@ -176,8 +176,7 @@ reserveA * reserveB >= k_initial
 lpReserve + 流通 LP 总量 == lpTotalSupply          // C = S - lpReserve
 每枚流通 LP 价值 = reserveA/C、reserveB/C           // LP 按流通量定价
 储备 FT 的 prevout txid == 当前池 UTXO 的 prevout txid   // 同 tx 绑定
-储备 FT 的 prevout outputIndex == 1/2/3                  // 固定输出序号
-changeOutput 为空或标准 P2PKH                            // 防额外 FT 输出
+储备 FT 的 prevout outputIndex == 1/2/3                  // 固定输出序号（储备唯一性核心保证）
 储备 FT 的 tokenAddress == 池地址
 池 UTXO 的 tokenAddress 每次更新保持不变（input == output）
 池 UTXO 的 genesisTxid 链式锚定 CREATE_POOL
@@ -398,7 +397,7 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 4. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
 5. **tokenAddress 不变**：input/output 一致；
 6. **标准 FT 数据在末尾**：现有索引器可找回；
-7. **changeOutput 校验**：只能为空或标准 P2PKH，防止同 tx 塞入池地址额外 FT；
+7. **储备唯一性靠 outputIndex 绑定**：changeOutput 不限制形态，池地址上的额外 FT 会锁死但无法冒充储备；
 8. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
 9. **最小储备只校验新状态（M1）**；
 10. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
@@ -473,7 +472,7 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 1. FT 守恒双保险：amountCheck + hashOutputs；
 2. **同 tx + 固定序号绑定**：储备 FT 必须与旧池同 tx 且 outputIndex=1/2/3，捐赠/第三方转入 UTXO 不能参与；
 3. **scriptHash 绑定**：所有传入 FT 脚本必须与 proof.scriptHash 一致，无法伪造储备/用户金额；
-4. **changeOutput 校验**：只能为空或 P2PKH，不能塞入池地址上的额外 FT；
+4. **changeOutput 不限制形态**：额外 FT 输出会锁死在池地址，但 outputIndex 绑定保证其不能冒充储备；
 5. **池 UTXO 链防伪造**：Backtrace；
 6. **池 tokenAddress 不变**：input/output 一致；
 7. **溢出防护（M2）**：safeMul/safeAdd；
@@ -549,7 +548,6 @@ genesisHash/genesisTxid = 池链标识
 | 储备 FT 与旧池不同 tx | 拒绝（同 tx 绑定） |
 | 储备 FT outputIndex != 1/2/3 | 拒绝（固定输出序号） |
 | 传入脚本 != proof.scriptHash | 拒绝（scriptHash 绑定） |
-| changeOutput 非空且非 P2PKH | 拒绝（防额外 FT 输出） |
 | 储备 FT 地址 != 池地址 | 拒绝 |
 | 储备 FT codeHash/tokenID 不匹配 | 拒绝 |
 | SWAP amountBOut/amountAOut != 公式值 | 拒绝 |

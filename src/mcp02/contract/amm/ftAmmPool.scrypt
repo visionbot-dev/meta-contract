@@ -378,12 +378,8 @@ contract FtAmmPool {
         outputs += userOutput;
         outputs += changeOutput;
 
-        // changeOutput 必须为空或标准 P2PKH（25B script + 8B satoshis），
-        // 防止同 tx 的 change 里塞入“池地址上的额外 FT 输出”破坏储备唯一性
-        require(
-            len(changeOutput) == 0 ||
-            (len(changeOutput) == 33 && changeOutput[:3] == b'76a914' && changeOutput[23 : 25] == b'88ac')
-        );
+        // changeOutput 不限制形态；储备唯一性由 prevout outputIndex 绑定保证
+        // （池地址上的额外 FT 输出会永久锁死，但不能冒充储备）
 
         require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
         require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));

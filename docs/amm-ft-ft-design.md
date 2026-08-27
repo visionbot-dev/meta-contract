@@ -350,6 +350,9 @@ bytes poolTxid = SigHash.outpoint(txPreimage)[:32];
 TxUtil.verifyTxOutput(proofA, prevouts[reserveAInputIndex]);
 TxUtil.verifyTxOutput(proofB, prevouts[reserveBInputIndex]);
 TxUtil.verifyTxOutput(proofLp, prevouts[lpInputIndex]);
+require(sha256(oldTokenAScript) == proofA.scriptHash);   // 绑定真实脚本（防伪造金额）
+require(sha256(oldTokenBScript) == proofB.scriptHash);
+require(sha256(oldLpScript) == proofLp.scriptHash);
 require(prevouts[reserveAInputIndex][:32] == poolTxid);   // 必须与旧池同 tx
 require(prevouts[reserveBInputIndex][:32] == poolTxid);
 require(prevouts[lpInputIndex][:32] == poolTxid);
@@ -363,9 +366,11 @@ require(TokenProto.getScriptCodeHash(oldTokenAScript) == tokenACodeHash);
 require(TokenProto.getTokenAddress(oldTokenAScript) == poolAddress);
 int reserveA_old = TokenProto.getTokenAmount(oldTokenAScript);
 // B / LP 同理（LP 也校验 codeHash）
+// 用户输入脚本同样绑定 userProof.scriptHash / lpUserProof.scriptHash
 
 // AMM 逻辑（SWAP/ADD/REMOVE）
 // SWAP 额外要求 outBCalc == amountBOut（严格等于公式）
+// 所有乘法/加法使用 safeMul / safeAdd，溢出即拒绝（M2）
 // ... 计算 newReserveA/newReserveB/newLpReserve
 require(newReserveA >= this.minReserve);
 require(newReserveB >= this.minReserve);
@@ -380,13 +385,15 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 ### 7.3 关键设计点
 
 1. **同 tx + 固定序号绑定**：储备 FT 的 prevout txid 必须等于旧池 UTXO 的 prevout txid，且 outputIndex 固定为 1/2/3；第三方转入/捐赠 UTXO 无法参与；
-2. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
-3. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
-4. **tokenAddress 不变**：input/output 一致；
-5. **标准 FT 数据在末尾**：现有索引器可找回；
-6. **changeOutput 校验**：只能为空或标准 P2PKH，防止同 tx 塞入池地址额外 FT；
-7. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
-8. **最小储备只校验新状态（M1）**。
+2. **scriptHash 绑定**：所有传入 FT 脚本必须 `sha256(script) == proof.scriptHash`，合约只解析链上真实 UTXO 脚本，杜绝伪造储备/用户金额；
+3. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
+4. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
+5. **tokenAddress 不变**：input/output 一致；
+6. **标准 FT 数据在末尾**：现有索引器可找回；
+7. **changeOutput 校验**：只能为空或标准 P2PKH，防止同 tx 塞入池地址额外 FT；
+8. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
+9. **最小储备只校验新状态（M1）**；
+10. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
 
 ---
 
@@ -457,10 +464,12 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 
 1. FT 守恒双保险：amountCheck + hashOutputs；
 2. **同 tx + 固定序号绑定**：储备 FT 必须与旧池同 tx 且 outputIndex=1/2/3，捐赠/第三方转入 UTXO 不能参与；
-3. **changeOutput 校验**：只能为空或 P2PKH，不能塞入池地址上的额外 FT；
-4. **池 UTXO 链防伪造**：Backtrace；
-5. **池 tokenAddress 不变**：input/output 一致；
-6. H1 / L2。
+3. **scriptHash 绑定**：所有传入 FT 脚本必须与 proof.scriptHash 一致，无法伪造储备/用户金额；
+4. **changeOutput 校验**：只能为空或 P2PKH，不能塞入池地址上的额外 FT；
+5. **池 UTXO 链防伪造**：Backtrace；
+6. **池 tokenAddress 不变**：input/output 一致；
+7. **溢出防护（M2）**：safeMul/safeAdd；
+8. H1 / L2。
 
 ### 10.2 经济安全
 
@@ -531,11 +540,13 @@ genesisHash/genesisTxid = 池链标识
 |---|---|
 | 储备 FT 与旧池不同 tx | 拒绝（同 tx 绑定） |
 | 储备 FT outputIndex != 1/2/3 | 拒绝（固定输出序号） |
+| 传入脚本 != proof.scriptHash | 拒绝（scriptHash 绑定） |
 | changeOutput 非空且非 P2PKH | 拒绝（防额外 FT 输出） |
 | 储备 FT 地址 != 池地址 | 拒绝 |
 | 储备 FT codeHash/tokenID 不匹配 | 拒绝 |
 | SWAP amountBOut/amountAOut != 公式值 | 拒绝 |
 | swapDirection 非法（非 A→B/B→A） | 拒绝 |
+| 乘法/加法溢出 | 拒绝（M2） |
 | 新状态 `reserveA_new/B_new < minReserve` | 拒绝（M1） |
 | 用户输入 tokenAddress == 池地址 | 拒绝（H1） |
 | 用户输出地址 != 输入 owner | 拒绝（L2） |

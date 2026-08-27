@@ -281,9 +281,11 @@ contract FtAmmPool {
             // 等比例约束
             require(mul(amountAIn, reserveB_old) == mul(amountBIn, reserveA_old));
 
-            // LP 铸造量
-            int lpMintA = mul(amountAIn, this.lpTotalSupply) / reserveA_old;
-            int lpMintB = mul(amountBIn, this.lpTotalSupply) / reserveB_old;
+            // LP 铸造量（按流通 LP 计算：S - lpReserve_old）
+            int circulatingLp = this.lpTotalSupply - lpReserve_old;
+            require(circulatingLp > 0);
+            int lpMintA = mul(amountAIn, circulatingLp) / reserveA_old;
+            int lpMintB = mul(amountBIn, circulatingLp) / reserveB_old;
             int lpMintCalc = lpMintA;
             if (lpMintB < lpMintA) {
                 lpMintCalc = lpMintB;
@@ -317,10 +319,12 @@ contract FtAmmPool {
             require(TokenProto.getTokenAddress(oldLpUserScript, oldLpUserScriptLen) == userAddress);
 
             require(lpReturn > 0);
-            require(lpReturn <= this.lpTotalSupply - lpReserve_old);
+            require(lpReturn <= this.lpTotalSupply - lpReserve_old); // 不超过流通 LP
 
-            int outA = mul(lpReturn, reserveA_old) / this.lpTotalSupply;
-            int outB = mul(lpReturn, reserveB_old) / this.lpTotalSupply;
+            // 赎回按流通 LP 计算：out = lpReturn * reserve / (S - lpReserve_old)
+            int circulatingLp = this.lpTotalSupply - lpReserve_old;
+            int outA = mul(lpReturn, reserveA_old) / circulatingLp;
+            int outB = mul(lpReturn, reserveB_old) / circulatingLp;
             require(outA > 0);
             require(outB > 0);
             require(outA == amountAOut);

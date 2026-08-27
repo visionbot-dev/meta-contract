@@ -173,7 +173,8 @@ T_old 输出布局：
 
 ```
 reserveA * reserveB >= k_initial
-lpReserve + 流通 LP 总量 == lpTotalSupply
+lpReserve + 流通 LP 总量 == lpTotalSupply          // C = S - lpReserve
+每枚流通 LP 价值 = reserveA/C、reserveB/C           // LP 按流通量定价
 储备 FT 的 prevout txid == 当前池 UTXO 的 prevout txid   // 同 tx 绑定
 储备 FT 的 prevout outputIndex == 1/2/3                  // 固定输出序号
 changeOutput 为空或标准 P2PKH                            // 防额外 FT 输出
@@ -259,8 +260,10 @@ reserveB_new = reserveB_old + inB
 ### 6.2 ADD_LIQUIDITY
 
 ```
-inA * reserveB_old == inB * reserveA_old
-ΔL = min(inA*S/reserveA_old, inB*S/reserveB_old)
+流通 LP：C = S - lpReserve_old
+
+等比例：inA * reserveB_old == inB * reserveA_old
+ΔL = min(inA*C/reserveA_old, inB*C/reserveB_old)
 ΔL > 0 且 ΔL <= lpReserve_old
 reserveA_new = reserveA_old + inA
 reserveB_new = reserveB_old + inB
@@ -268,11 +271,16 @@ lpReserve_new = lpReserve_old - ΔL
 reserveA_new/reserveB_new >= minReserve
 ```
 
+LP 价值按**流通 LP** 计算：`ΔL / C = inA / reserveA_old`。
+
 ### 6.3 REMOVE_LIQUIDITY
 
 ```
-outA = lpReturn * reserveA_old / S
-outB = lpReturn * reserveB_old / S
+流通 LP：C = S - lpReserve_old
+
+lpReturn > 0 且 lpReturn <= C
+outA = lpReturn * reserveA_old / C
+outB = lpReturn * reserveB_old / C
 outA > 0, outB > 0
 reserveA_new = reserveA_old - outA
 reserveB_new = reserveB_old - outB

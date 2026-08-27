@@ -16,6 +16,8 @@ export enum FT_AMM_POOL_OP {
 export type FtAmmPoolUnlockArgs = {
   txPreimage: SigHashPreimage
   prevouts: Bytes
+  poolScript: Bytes
+  poolProof: any
   op: FT_AMM_POOL_OP
   swapDirection?: number
   // 池内储备 FT 输入
@@ -115,9 +117,11 @@ export class FtAmmPool extends ContractAdapter {
       require('../contract-desc/ftAmmPool_desc.json')
     )
     const wrapProof = (proof: any, Cls: any) =>
-      proof && proof.txHeader ? new Cls(proof) : proof
+      proof && proof.txHeader && !(proof instanceof Cls) ? new Cls(proof) : proof
 
     const opts = {
+      poolScript: new Bytes(''),
+      poolProof: new TxOutputProof({ txHeader: new Bytes(''), hashProof: new Bytes(''), satoshiBytes: new Bytes(''), scriptHash: new Bytes('') }),
       swapDirection: 0,
       userTokenScriptA: new Bytes(''),
       userTokenScriptB: new Bytes(''),
@@ -150,6 +154,8 @@ export class FtAmmPool extends ContractAdapter {
     return this._contract.unlock(
       opts.txPreimage,
       opts.prevouts,
+      opts.poolScript,
+      wrapProof(opts.poolProof, TxOutputProof),
       opts.op,
       opts.swapDirection,
       opts.oldTokenAScript,

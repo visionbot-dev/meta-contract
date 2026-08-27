@@ -314,6 +314,8 @@ contract FtAmmPool {
     public function unlock(
         SigHashPreimage txPreimage,
         bytes prevouts,
+        bytes poolScript,
+        TxOutputProof poolProof,
         int op,
         int swapDirection,
         bytes oldTokenAScript, bytes oldTokenBScript, bytes oldLpScript,
@@ -337,13 +339,16 @@ contract FtAmmPool {
 ### 7.2 核心校验逻辑（伪代码）
 
 ```
-bytes poolScript = SigHash.scriptCode(txPreimage);
+// 池输入必须是当前 input 的 prevout，且传入脚本必须是链上真实完整锁定脚本
+// （SigHash.scriptCode 只是 OP_CODESEPARATOR 后的片段，不能用来算池地址/构造新池输出）
+bytes thisOutpoint = SigHash.outpoint(txPreimage);
+TxUtil.verifyTxOutput(poolProof, thisOutpoint);
+require(sha256(poolScript) == poolProof.scriptHash);
 int poolScriptLen = len(poolScript);
 bytes poolTokenAddress = TokenProto.getTokenAddress(poolScript, poolScriptLen);
 
 // TokenGenesis 链式更新（genesisTxid 0 → CREATE_POOL outpoint，后续 Backtrace）
 bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
-bytes thisOutpoint = SigHash.outpoint(txPreimage);
 if (genesisTxid == NULL_GENESIS_TXID) {
     genesisTxid = thisOutpoint;
 } else {
@@ -393,14 +398,15 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 
 1. **同 tx + 固定序号绑定**：储备 FT 的 prevout txid 必须等于旧池 UTXO 的 prevout txid，且 outputIndex 固定为 1/2/3；第三方转入/捐赠 UTXO 无法参与；
 2. **scriptHash 绑定**：所有传入 FT 脚本必须 `sha256(script) == proof.scriptHash`，合约只解析链上真实 UTXO 脚本，杜绝伪造储备/用户金额；
-3. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
-4. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
-5. **tokenAddress 不变**：input/output 一致；
-6. **标准 FT 数据在末尾**：现有索引器可找回；
-7. **储备唯一性靠 outputIndex 绑定**：changeOutput 不限制形态，池地址上的额外 FT 会锁死但无法冒充储备；
-8. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
-9. **最小储备只校验新状态（M1）**；
-10. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
+3. **池脚本走完整脚本**：`poolScript` 必须是完整锁定脚本（含 code part），由 `poolProof.scriptHash` 绑定；不能用 `SigHash.scriptCode`（它只是 OP_CODESEPARATOR 后的片段）；
+4. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
+5. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
+6. **tokenAddress 不变**：input/output 一致；
+7. **标准 FT 数据在末尾**：现有索引器可找回；
+8. **储备唯一性靠 outputIndex 绑定**：changeOutput 不限制形态，池地址上的额外 FT 会锁死但无法冒充储备；
+9. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
+10. **最小储备只校验新状态（M1）**；
+11. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
 
 ---
 

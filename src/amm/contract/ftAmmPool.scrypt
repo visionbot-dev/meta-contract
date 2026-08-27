@@ -52,6 +52,8 @@ contract FtAmmPool {
     public function unlock(
         SigHashPreimage txPreimage,
         bytes prevouts,
+        bytes poolScript,
+        TxOutputProof poolProof,
         int op,
         int swapDirection,
         // 池内储备 FT 输入
@@ -102,7 +104,11 @@ contract FtAmmPool {
     ) {
         require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
 
-        bytes poolScript = SigHash.scriptCode(txPreimage);
+        // 池输入必须是当前 input 的 prevout，且传入脚本必须是链上真实完整锁定脚本
+        // （SigHash.scriptCode 只是 OP_CODESEPARATOR 后的片段，不能用来算池地址/构造新池输出）
+        bytes thisOutpoint = SigHash.outpoint(txPreimage);
+        TxUtil.verifyTxOutput(poolProof, thisOutpoint);
+        require(sha256(poolScript) == poolProof.scriptHash);
         int poolScriptLen = len(poolScript);
 
         // ========== 读取池 tokenAddress（用于保证 input/output 一致） ==========
@@ -110,7 +116,6 @@ contract FtAmmPool {
 
         // ========== TokenGenesis 链式更新 ==========
         bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
-        bytes thisOutpoint = SigHash.outpoint(txPreimage);
         bool isFirst = false;
         if (genesisTxid == ProtoHeader.NULL_GENESIS_TXID) {
             isFirst = true;

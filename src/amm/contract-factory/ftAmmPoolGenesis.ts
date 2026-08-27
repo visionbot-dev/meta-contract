@@ -20,7 +20,7 @@ export type FtAmmPoolGenesisUnlockArgs = {
   proofA: any
   proofB: any
   proofLp: any
-  userAddress?: Bytes
+  userAddress?: Bytes // 创建者地址（LP 输出）；不要传 genesis/池地址，避免 LP 被锁死
   lpMint?: number
   // 输出 satoshis
   poolSatoshis: number

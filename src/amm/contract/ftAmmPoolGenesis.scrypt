@@ -94,6 +94,15 @@ contract FtAmmPoolGenesis {
         require(sha256(genesisScript) == genesisProof.scriptHash);
         bytes genesisAddress = hash160(genesisScript);
 
+        // poolScript 的 data part 必须与 genesis 自身一致：
+        // - tokenAddress 是检索键，genesis 固定后不可改
+        // - genesisTxid 必须还是 NULL（未 issue 状态），由本次 issue 锚定
+        int poolScriptLen = len(poolScript);
+        int genesisScriptLen = len(genesisScript);
+        require(TokenProto.getTokenAddress(poolScript, poolScriptLen)
+             == TokenProto.getTokenAddress(genesisScript, genesisScriptLen));
+        require(TokenProto.getGenesisTxid(poolScript, poolScriptLen) == ProtoHeader.NULL_GENESIS_TXID);
+
         // 预锁储备读金额
         int inA = readLocked(lockedTokenAScript, proofA, this.tokenAID, this.tokenACodeHash, genesisAddress, prevouts, LOCKED_A_INPUT_INDEX);
         int inB = readLocked(lockedTokenBScript, proofB, this.tokenBID, this.tokenBCodeHash, genesisAddress, prevouts, LOCKED_B_INPUT_INDEX);
@@ -115,7 +124,6 @@ contract FtAmmPoolGenesis {
         int newLpReserve = lpLocked - lpMint;
 
         // 新池脚本必须是指定的 FtAmmPool 代码 + genesisTxid = PoolGenesis outpoint
-        int poolScriptLen = len(poolScript);
         require(hash160(TokenProto.getScriptCode(poolScript, poolScriptLen)) == this.poolCodeHash);
         bytes newPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, thisOutpoint);
         bytes newPoolAddress = hash160(newPoolScript);

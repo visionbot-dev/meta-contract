@@ -387,15 +387,14 @@ contract FtAmmPool {
         require(newReserveB >= this.minReserve);
 
         // ========== 构造新池 UTXO 脚本 ==========
-        // 只更新标准 FT 数据中的 genesisTxid（首次写入 thisOutpoint，之后保持不变）；
+        // 只更新标准 FT 数据中的 genesisTxid（由 PoolGenesis issue 锚定后保持不变）；
         // 池状态（reserveA/B/lpReserve）不写入 data part，由“与旧池同 tx 的储备 FT”承载
         bytes newPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, genesisTxid);
 
         // 地址不变：output 池 UTXO 的 tokenAddress 必须与 input 一致
         require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAddress);
 
-        // 新储备必须锁到新池地址：首次操作 genesisTxid 从 NULL 变为 thisOutpoint，
-        // 池脚本 hash160 会改变，若继续用旧 poolAddress 会导致下一次操作无法通过地址校验
+        // genesisTxid 恒定 → newPoolAddress == poolAddress（新储备继续锁到同一池地址）
         bytes newPoolAddress = hash160(newPoolScript);
 
         // ========== 输出构造 ==========

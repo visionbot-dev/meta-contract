@@ -2,7 +2,7 @@
     "version": 9,
     "compilerVersion": "1.19.0+commit.72eaeba",
     "contract": "FtAmmPool",
-    "md5": "47a53f54b5a7fc5c96a472e48ebef214",
+    "md5": "836cdf08278a4a0c4077636ca4a4a2a1",
     "structs": [
         {
             "name": "LockingScriptParts",

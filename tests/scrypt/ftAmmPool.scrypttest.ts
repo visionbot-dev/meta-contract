@@ -9,7 +9,7 @@ import * as proto from '../../src/common/protoheader'
 import * as BN from '../../src/bn.js'
 
 describe('FtAmmPool contract (data part / indexer compatibility)', () => {
-  const OFFICIAL_ADDRESS = '01'.repeat(20)
+  const POOL_ADDRESS = '01'.repeat(20)
 
   function createPoolContract(reserveA: BN, reserveB: BN, lpReserve: BN) {
     const contract = FtAmmPoolFactory.createContract({
@@ -22,7 +22,6 @@ describe('FtAmmPool contract (data part / indexer compatibility)', () => {
       lpTotalSupply: 1000000,
       minReserve: 1,
       feeBps: 30,
-      officialAddress: new Bytes(OFFICIAL_ADDRESS),
     })
     contract.setDataPart(
       toHex(
@@ -33,7 +32,7 @@ describe('FtAmmPool contract (data part / indexer compatibility)', () => {
           tokenName: 'A-B-AMM',
           tokenSymbol: 'AMM',
           decimalNum: 18,
-          tokenAddress: OFFICIAL_ADDRESS,
+          tokenAddress: POOL_ADDRESS,
           tokenAmount: lpReserve,
           genesisHash: '00'.repeat(20),
           genesisTxid: '00'.repeat(32) + '_0',
@@ -67,9 +66,9 @@ describe('FtAmmPool contract (data part / indexer compatibility)', () => {
     expect(parsed.tokenName.replace(/\0+$/, '')).to.equal('A-B-AMM')
   })
 
-  it('should keep tokenAddress immutable in data part construction', () => {
+  it('should keep pool tokenAddress in data part', () => {
     const contract = createPoolContract(new BN(1), new BN(1), new BN(999998))
     const parsed = ftAmmPoolProto.parseDataPart(contract.lockingScript.toBuffer())
-    expect(parsed.tokenAddress).to.equal(OFFICIAL_ADDRESS)
+    expect(parsed.tokenAddress).to.equal(POOL_ADDRESS)
   })
 })

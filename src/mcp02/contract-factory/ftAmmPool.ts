@@ -75,7 +75,6 @@ export class FtAmmPool extends ContractAdapter {
     lpTotalSupply: number
     minReserve: number
     feeBps: number
-    officialAddress: Bytes
   }
 
   constructor(constuctParams: {
@@ -88,7 +87,6 @@ export class FtAmmPool extends ContractAdapter {
     lpTotalSupply: number
     minReserve: number
     feeBps: number
-    officialAddress: Bytes
   }) {
     const desc = require('../contract-desc/ftAmmPool_desc.json')
     const ClassObj = buildContractClass(desc)
@@ -101,8 +99,7 @@ export class FtAmmPool extends ContractAdapter {
       constuctParams.lpTokenID,
       constuctParams.lpTotalSupply,
       constuctParams.minReserve,
-      constuctParams.feeBps,
-      constuctParams.officialAddress
+      constuctParams.feeBps
     )
     super(contract)
     this.constuctParams = constuctParams
@@ -206,7 +203,6 @@ export class FtAmmPoolFactory {
     lpTotalSupply: number
     minReserve: number
     feeBps: number
-    officialAddress: Bytes
   }): FtAmmPool {
     return new FtAmmPool(params)
   }
@@ -222,7 +218,6 @@ export class FtAmmPoolFactory {
       lpTotalSupply: 1000000,
       minReserve: 1,
       feeBps: 30,
-      officialAddress: new Bytes('77'.repeat(20)),
     })
     return dummy.lockingScript.toBuffer().length
   }

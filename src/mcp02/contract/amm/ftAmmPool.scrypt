@@ -29,11 +29,6 @@ contract FtAmmPool {
     static const int OP_ADD = 2;
     static const int OP_REMOVE = 3;
 
-    // data part 布局：<池子Proto(24)> + <标准FT数据(172)>
-    static const int POOL_PROTO_LEN = 24;
-    static const int FT_DATA_LEN = TokenProto.DATA_LEN;
-    static const int POOL_TAIL_LEN = POOL_PROTO_LEN + FT_DATA_LEN;
-
     public function unlock(
         SigHashPreimage txPreimage,
         bytes prevouts,
@@ -118,18 +113,18 @@ contract FtAmmPool {
             );
         }
 
-        // ========== 读取池子 Proto（旧状态） ==========
-        bytes poolProto = poolScript[poolScriptLen - POOL_TAIL_LEN : poolScriptLen - FT_DATA_LEN];
-        int reserveA_old = Utils.fromLEUnsigned(poolProto[0 : 8]);
-        int reserveB_old = Utils.fromLEUnsigned(poolProto[8 : 16]);
-        int lpReserve_old = Utils.fromLEUnsigned(poolProto[16 : 24]);
-
-        // ========== 校验池内储备 FT 输入 ==========
+        // ========== 校验池内储备 FT 输入（必须与旧池同 tx，且读金额即 reserve） ==========
         bytes poolAddress = hash160(poolScript);
+        bytes poolTxid = SigHash.outpoint(txPreimage)[: 32];
 
         TxUtil.verifyTxOutput(proofA, prevouts[reserveAInputIndex * TxUtil.OUTPOINT_LEN : (reserveAInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
         TxUtil.verifyTxOutput(proofB, prevouts[reserveBInputIndex * TxUtil.OUTPOINT_LEN : (reserveBInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
         TxUtil.verifyTxOutput(proofLp, prevouts[lpInputIndex * TxUtil.OUTPOINT_LEN : (lpInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+
+        // 储备 FT 必须来自创建旧池 UTXO 的同一笔交易（禁止第三方转入/捐赠 UTXO 参与）
+        require(prevouts[reserveAInputIndex * TxUtil.OUTPOINT_LEN : reserveAInputIndex * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
+        require(prevouts[reserveBInputIndex * TxUtil.OUTPOINT_LEN : reserveBInputIndex * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
+        require(prevouts[lpInputIndex * TxUtil.OUTPOINT_LEN : lpInputIndex * TxUtil.OUTPOINT_LEN + 32] == poolTxid);
 
         int oldTokenAScriptLen = len(oldTokenAScript);
         int oldTokenBScriptLen = len(oldTokenBScript);
@@ -138,16 +133,16 @@ contract FtAmmPool {
         require(TokenProto.getTokenID(oldTokenAScript, oldTokenAScriptLen) == this.tokenAID);
         require(TokenProto.getScriptCodeHash(oldTokenAScript, oldTokenAScriptLen) == this.tokenACodeHash);
         require(TokenProto.getTokenAddress(oldTokenAScript, oldTokenAScriptLen) == poolAddress);
-        require(TokenProto.getTokenAmount(oldTokenAScript, oldTokenAScriptLen) == reserveA_old);
+        int reserveA_old = TokenProto.getTokenAmount(oldTokenAScript, oldTokenAScriptLen);
 
         require(TokenProto.getTokenID(oldTokenBScript, oldTokenBScriptLen) == this.tokenBID);
         require(TokenProto.getScriptCodeHash(oldTokenBScript, oldTokenBScriptLen) == this.tokenBCodeHash);
         require(TokenProto.getTokenAddress(oldTokenBScript, oldTokenBScriptLen) == poolAddress);
-        require(TokenProto.getTokenAmount(oldTokenBScript, oldTokenBScriptLen) == reserveB_old);
+        int reserveB_old = TokenProto.getTokenAmount(oldTokenBScript, oldTokenBScriptLen);
 
         require(TokenProto.getTokenID(oldLpScript, oldLpScriptLen) == this.lpTokenID);
         require(TokenProto.getTokenAddress(oldLpScript, oldLpScriptLen) == poolAddress);
-        require(TokenProto.getTokenAmount(oldLpScript, oldLpScriptLen) == lpReserve_old);
+        int lpReserve_old = TokenProto.getTokenAmount(oldLpScript, oldLpScriptLen);
 
         // ========== AMM 逻辑 ==========
         int newReserveA = 0;
@@ -276,16 +271,9 @@ contract FtAmmPool {
         require(newReserveB >= this.minReserve);
 
         // ========== 构造新池 UTXO 脚本 ==========
-        // 1. 更新标准 FT 数据中的 genesisTxid（首次写入 thisOutpoint，之后保持不变）
-        bytes tmpPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, genesisTxid);
-        // 2. 更新池子 Proto（reserveA/B/lpReserve）
-        bytes codePart = tmpPoolScript[: poolScriptLen - POOL_TAIL_LEN];
-        bytes ftData = tmpPoolScript[poolScriptLen - FT_DATA_LEN :];
-        bytes newPoolProto =
-            Utils.toLEUnsigned(newReserveA, 8) +
-            Utils.toLEUnsigned(newReserveB, 8) +
-            Utils.toLEUnsigned(newLpReserve, 8);
-        bytes newPoolScript = codePart + newPoolProto + ftData;
+        // 只更新标准 FT 数据中的 genesisTxid（首次写入 thisOutpoint，之后保持不变）；
+        // 池状态（reserveA/B/lpReserve）不写入 data part，由“与旧池同 tx 的储备 FT”承载
+        bytes newPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, genesisTxid);
 
         // 地址不变：output 池 UTXO 的 tokenAddress 必须与 input 一致
         require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAddress);

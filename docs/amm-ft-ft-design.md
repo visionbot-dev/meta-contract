@@ -1,21 +1,19 @@
-# MCP02 AMM FT-FT 交易合约设计文档（方案 A v2.0）
+# MCP02 AMM FT-FT 交易合约设计文档（v3.0）
 
-> 版本：v2.0（v1.2 基础上重构状态模型与索引兼容方式）  
+> 版本：v3.0（v2.0 基础上改为“储备 FT 与池 UTXO 同 tx 绑定”，去掉 data part 中的 reserve 状态）  
 > 日期：2026-08-27  
-> 状态：设计定稿（待代码落地）  
+> 状态：设计定稿（合约已落地，SDK 待补）  
 > 范围：基于 MCP02 FT 协议的恒定乘积 AMM（FT-FT），LP 份额采用「普通 MCP02 FT + 固定总量预铸 + 池内自持 LP 储备」模型。
 
-## v2.0 相对 v1.2 的核心变化
+## v3.0 相对 v2.0 的核心变化
 
-| 项 | v1.2 | v2.0 |
+| 项 | v2.0 | v3.0 |
 |---|---|---|
-| 池地址 | 固定地址、无状态 | **有状态池 UTXO，地址随 data part 迁移** |
-| 状态载体 | 池地址下 FT UTXO 的 `tokenAmount` | **池 UTXO data part（池子 Proto）** |
-| 池 UTXO 更新 | 脚本不变 | **TokenGenesis 链式更新（Backtrace 回溯）** |
-| 检索键 | 固定池地址 | **tokenAddress 在 CREATE_POOL 设定，后续 input/output 一致（不变）** |
-| 索引器兼容 | 需要识别 AMM 类型 | **池 UTXO 伪装为标准 FT（protoType=1），现有索引器直接可找回** |
-| 业务层状态读取 | 读池地址下 FT 金额 | **从 txHex 解析池 UTXO 的池子 Proto** |
-| 防伪造池 | 依赖地址唯一 | **Backtrace 链锚定 CREATE_POOL，伪造 UTXO 无法通过** |
+| 池状态载体 | 池 UTXO data part（池子 Proto） | **储备 FT 与池 UTXO 同 tx 绑定，状态由储备 FT 金额承载** |
+| data part | 池子 Proto + 标准 FT 数据 | **仅标准 FT 数据（静态）** |
+| 池地址 | 随 data part 迁移 | **基本恒定**（仅首次操作 genesisTxid 0→outpoint 变化一次） |
+| 防捐赠/伪造储备 | 靠 data part 金额校验 | **靠 txid 绑定：储备 FT 必须与旧池同 tx** |
+| 业务层读状态 | 解析池 UTXO data part | **读池 UTXO 创建 tx 中的储备 FT** |
 
 ---
 
@@ -40,20 +38,21 @@
 
 ## 1. 概述
 
-本方案在 **MCP02（Meta Contract Protocol 02 / FT）** 基础上设计一个 **FT ↔ FT 的 AMM 自动做市合约**：
+本方案在 **MCP02（Meta Contract Protocol 02 / FT）** 基础上设计 **FT ↔ FT 的 AMM 自动做市合约**：
 
 - 交易对由两种普通 MCP02 FT（FT-A、FT-B）组成；
-- 定价采用恒定乘积公式 `x·y = k`；
-- **SWAP 收取手续费（默认 `feeBps = 30`，即 0.3%），手续费直接留在池中，作为 LP 收益**；
-- 支持 `CREATE_POOL`、`ADD_LIQUIDITY`、`REMOVE_LIQUIDITY`、`SWAP` 四种操作；
-- **LP 份额本身也是普通 MCP02 FT**（LP-FT），可被标准钱包/浏览器识别、可转账、可挂单交易。
+- 定价采用恒定乘积 `x·y = k`；
+- SWAP 收取手续费（默认 `feeBps = 30`，0.3%），手续费留在池中；
+- 支持 `CREATE_POOL`、`ADD_LIQUIDITY`、`REMOVE_LIQUIDITY`、`SWAP`；
+- LP 份额是普通 MCP02 FT，可转账/挂单。
 
-v2.0 的核心思路：
+**v3.0 核心思路：**
 
-1. **池状态（reserveA / reserveB / lpReserve）写入池 UTXO 的 data part**，每次操作生成新的池 UTXO，地址随状态迁移；
-2. **池 UTXO 采用 TokenGenesis 的链式更新模式**：`genesisTxid` 锚定 CREATE_POOL outpoint，每次更新通过 `Backtrace.verify` 回溯，防止伪造池 UTXO；
-3. **池 UTXO 的 data part 同时包含一份标准 MCP02 FT 数据**（末尾 172 字节），`tokenAddress` 在 CREATE_POOL 时设定、之后每次更新保持不变（合约强制 input/output 一致），现有索引器可以把它当作普通 FT 找回；
-4. **池子专用状态（reserveA/B/lpReserve）放在标准 FT 数据前面**，索引器不识别，业务层从 txHex 解析。
+1. **池 UTXO 与三枚储备 FT（FT-A/B/LP）永远在同一笔交易中创建**；
+2. 合约强制“储备 FT 输入的 prevout txid == 旧池 UTXO 的 prevout txid”；
+3. 因此**不需要把 reserveA/reserveB/lpReserve 写入池 UTXO data part**，金额直接从绑定储备 FT 读取；
+4. 池 UTXO data part 只保留标准 MCP02 FT 数据（tokenAddress/name/symbol/genesis 等），用于索引器找回；
+5. 池 UTXO 采用 TokenGenesis 链式更新（genesisTxid + Backtrace），防止伪造池。
 
 ---
 
@@ -63,128 +62,107 @@ v2.0 的核心思路：
 
 | 编号 | 目标 |
 |---|---|
-| G1 | 两种任意 MCP02 FT 之间可自由兑换，价格由链上恒定乘积公式自动决定 |
+| G1 | 两种任意 MCP02 FT 之间可自由兑换，价格由链上恒定乘积公式决定 |
 | G2 | 任何人可添加/移除流动性，无需信任第三方 |
 | G3 | LP 份额是标准 MCP02 FT，可在二级市场流通 |
-| G4 | 池内资产安全由链上合约强制，不依赖业务方/索引器/运营方 |
-| G5 | 尽可能复用现有 MCP02 组件（Token、TokenUnlockContractCheck、TokenProto、Backtrace 等） |
+| G4 | 池内资产安全由链上合约强制 |
+| G5 | 尽可能复用现有 MCP02 组件 |
 | G6 | 现有索引器无需改动即可找回池 UTXO（通过稳定的池 tokenAddress） |
+| G7 | **禁止第三方转入池地址的 FT 参与池储备**（同 tx 绑定） |
 
 ### 2.2 关键取舍
 
 | 取舍点 | 选择 | 原因 |
 |---|---|---|
-| 定价模型 | 恒定乘积 `x·y = k` | 简单、成熟（Uniswap V2 风格），适合链上整数运算 |
-| 手续费 | SWAP 收取 `feeBps`（默认 30 = 0.3%），直接留在池中 | 为 LP 提供收益；ADD/REMOVE 不收手续费 |
-| LP 份额形态 | 普通 MCP02 FT | 可被标准工具识别、可转让 |
-| LP 发行方式 | 固定总量预铸 + 池内自持 | 避免改造 TokenGenesis，保持 permissionless 添加流动性 |
-| 流动性铸造/回收 | add=池子转出 LP，remove=用户归还并合并回池内储备 | 用普通 FT 转账语义模拟 Uniswap 的 mint/burn |
-| 初始 LP 计算 | CREATE_POOL 内建初始流动性：`ΔL = min(inA, inB)` | 避免链上开方 |
-| 添加流动性比例 | 严格等比例 | 避免“多退少补” |
-| 最小储备 | 合约强制**新状态** `reserveA/reserveB >= minReserve` | 防“微小池”份额操纵，且操作后池子仍健康 |
-| 池状态载体 | **池 UTXO data part** | 状态唯一、可验证、防储备歧义 |
-| 池 UTXO 更新 | **TokenGenesis 链式更新 + Backtrace** | 防伪造池 UTXO，链可追踪 |
-| 索引兼容 | **池 UTXO 伪装为标准 FT（protoType=1）** | 现有索引器零改动可找回 |
-| 检索键 | **tokenAddress 稳定（input/output 一致）** | 稳定、简单、与池状态无关 |
-| 池子状态读取 | 业务层从 txHex 解析池子 Proto | 索引器不需要理解池语义 |
-| 池 UTXO satoshi 面值 | 不保护（MVC dust = 1 sat） | 池输出只需 >= 1 sat 即可持续使用 |
+| 定价模型 | 恒定乘积 `x·y = k` | 简单、成熟 |
+| 手续费 | SWAP 收 `feeBps`，留池 | LP 收益 |
+| LP 份额形态 | 普通 MCP02 FT | 标准可识别 |
+| LP 发行方式 | 固定总量预铸 + 池内自持 | 避免改 TokenGenesis |
+| 池状态载体 | **储备 FT（与池 UTXO 同 tx）** | 无需 data part 状态，池地址恒定 |
+| 储备绑定 | **prevout txid == 旧池 txid** | 防捐赠/防伪造储备 |
+| 池 UTXO 更新 | TokenGenesis 链式更新 + Backtrace | 防伪造池 UTXO |
+| 索引兼容 | 池 UTXO 伪装标准 FT（protoType=1） | 现有索引器零改动找回 |
+| 检索键 | tokenAddress 稳定（input/output 一致） | 稳定、简单 |
+| 最小储备 | 只校验**新状态** `>= minReserve` | 防微小池，操作后池子仍健康 |
+| 池 UTXO satoshi 面值 | 不保护（dust = 1 sat） | MVC 最小 dust |
 
 ---
 
 ## 3. 总体方案
 
-```mermaid
-graph LR
-    subgraph 链上
-        P1[池 UTXO<br/>FtAmmPool 合约<br/>data part = 池子Proto + 标准FT数据]
-        R1[FT-A 储备 UTXO<br/>tokenAddress = 实际池地址]
-        R2[FT-B 储备 UTXO<br/>tokenAddress = 实际池地址]
-        R3[LP-FT 池内储备 UTXO<br/>tokenAddress = 实际池地址]
-        U1[用户 LP-FT]
-        U2[用户 FT-A / FT-B]
-    end
-
-    P1 -->|SWAP/ADD/REMOVE| P1_new[新池 UTXO<br/>genesisTxid 链式更新]
-    P1 -->|锁定| R1
-    P1 -->|锁定| R2
-    P1 -->|锁定| R3
-    R3 -->|add 转出| U1
-    U1 -->|remove 归还| R3
-    R1 -->|swap/add| U2
-    U2 -->|swap/add| R1
+```
+每笔操作交易：
+  输入：
+    旧池 UTXO（T_old 创建）
+    FT-A 储备 UTXO（T_old 创建，池地址）
+    FT-B 储备 UTXO（T_old 创建，池地址）
+    LP 储备 UTXO（T_old 创建，池地址）
+    用户输入 / SPACE / amountCheck
+  输出：
+    新池 UTXO（T_new 创建）
+    新 FT-A/B/LP 储备 UTXO（T_new 创建，池地址）
+    用户输出 / SPACE 找零
 ```
 
-- **池 UTXO**：`FtAmmPool` 合约输出，data part 包含池子 Proto（reserveA/B/lpReserve）+ 标准 FT 数据（池 tokenAddress、genesisHash/genesisTxid）。
-- **池内 FT 储备**：三枚普通 MCP02 FT UTXO（FT-A/B/LP），`tokenAddress = 实际池地址`（当前池 UTXO 的脚本 hash）。
-- **用户侧**：普通 FT 持有，无特殊合约。
-- **每次操作**：花费旧池 UTXO + 旧储备 FT，输出新池 UTXO（data part 更新）+ 新储备 FT + 用户 FT + change。
+- 池 UTXO 与储备 FT **同 tx 创建、同 tx 花费**，形成不可分割的“池状态组”；
+- 第三方单独转入池地址的 FT UTXO 由于 txid 不匹配，无法参与任何操作。
 
 ---
 
 ## 4. 状态模型
 
-### 4.1 池 UTXO（有状态）
+### 4.1 池 UTXO
 
-**构造参数（不可变，写入 code part）**
+**构造参数（不可变，code part）**
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `tokenACodeHash` | bytes(20) | FT-A 的 `TokenProto.getScriptCodeHash` |
-| `tokenAID` | bytes(20) | FT-A 的 `TokenProto.getTokenID` |
-| `tokenBCodeHash` | bytes(20) | FT-B 的 `TokenProto.getScriptCodeHash` |
-| `tokenBID` | bytes(20) | FT-B 的 `TokenProto.getTokenID` |
-| `lpTokenCodeHash` | bytes(20) | LP-FT 的 `TokenProto.getScriptCodeHash` |
-| `lpTokenID` | bytes(20) | LP-FT 的 `TokenProto.getTokenID` |
-| `lpTotalSupply` | int | LP-FT 链上总发行量（固定，如 `S`），必须 > 0 |
-| `minReserve` | int | 最小储备阈值（A/B 共用） |
-| `feeBps` | int | swap 手续费率（基点），默认 30；`0 <= feeBps < 10000` |
+| `tokenACodeHash` | bytes(20) | FT-A codehash |
+| `tokenAID` | bytes(20) | FT-A tokenID |
+| `tokenBCodeHash` | bytes(20) | FT-B codehash |
+| `tokenBID` | bytes(20) | FT-B tokenID |
+| `lpTokenCodeHash` | bytes(20) | LP-FT codehash |
+| `lpTokenID` | bytes(20) | LP-FT tokenID |
+| `lpTotalSupply` | int | LP 固定总量 S |
+| `minReserve` | int | 最小储备阈值 |
+| `feeBps` | int | 手续费基点，默认 30 |
 
-> `tokenAddress` 不是构造参数，而是标准 FT 数据字段：CREATE_POOL 时由创建者设定，之后每次更新由合约保证 input/output 一致（不可变）。
-
-**data part（可变）**
+**data part（静态）**
 
 ```
-[池子 Proto]
-  reserveA   (8, LE)
-  reserveB   (8, LE)
-  lpReserve  (8, LE)
-
-[标准 MCP02 FT 数据（末尾 172 字节，供现有索引器识别）]
+[标准 MCP02 FT 数据（172 字节）]
   tokenName(40) tokenSymbol(20) decimal(1)
   tokenAddress(20) = 池 tokenAddress（CREATE_POOL 设定，之后不变）
-  tokenAmount(8)   = 任意值（建议 lpReserve）
-  genesisHash(20)  = hash160(新池脚本)（链式更新）
+  tokenAmount(8)   = 0（占位，不使用）
+  genesisHash(20)  = 池链标识
   genesisTxid(36)  = CREATE_POOL outpoint（首次操作后固定）
   protoVersion(4)=1 protoType(4)=1 PROTO_FLAG(12) dataLen(4) version(1)
 ```
 
-**池地址**：
+**不包含任何 reserve 字段。**
 
-```
-池地址 = hash160(完整锁定脚本) = hash160(FtAmmPool code + 池子Proto + 标准FT数据)
-```
+### 4.2 储备 FT
 
-由于池子 Proto 随状态变化，**池地址每次操作都会变化**。
+- FT-A 储备：`tokenAddress = 池地址`，`tokenAmount = reserveA`；
+- FT-B 储备：`tokenAddress = 池地址`，`tokenAmount = reserveB`；
+- LP 储备：`tokenAddress = 池地址`，`tokenAmount = lpReserve`。
 
-### 4.2 池内 FT 储备 UTXO
+**关键约束：三枚储备 FT 必须与当前池 UTXO 在同一笔交易中创建（prevout txid 相同）。**
 
-- FT-A 储备：`tokenAddress = 当前池地址`，`tokenAmount = reserveA`；
-- FT-B 储备：`tokenAddress = 当前池地址`，`tokenAmount = reserveB`；
-- LP-FT 池内储备：`tokenAddress = 当前池地址`，`tokenAmount = lpReserve`。
+### 4.3 用户侧 LP-FT
 
-### 4.3 用户侧 LP-FT UTXO
-
-- 普通 MCP02 FT，`tokenAddress = 用户地址`，`tokenAmount = 用户持有的份额`。
+普通 MCP02 FT，`tokenAddress = 用户地址`。
 
 ### 4.4 不变式
 
 ```
-reserveA * reserveB >= k_initial                 // swap 后 k 不减少
-lpReserve + 流通 LP 总量 == lpTotalSupply          // 固定总量守恒
-池 UTXO 的 tokenAddress 每次更新保持不变（input == output）  // 地址标识不变
-池 UTXO 的 genesisTxid 链式锚定 CREATE_POOL        // Backtrace 可回溯
-池内储备 FT 的 tokenAddress == 当前池地址           // 由池合约强制
-可变状态（reserveA/reserveB/lpReserve）只存在于池 UTXO data part
+reserveA * reserveB >= k_initial
+lpReserve + 流通 LP 总量 == lpTotalSupply
+储备 FT 的 prevout txid == 当前池 UTXO 的 prevout txid   // 同 tx 绑定
+储备 FT 的 tokenAddress == 池地址
+池 UTXO 的 tokenAddress 每次更新保持不变（input == output）
+池 UTXO 的 genesisTxid 链式锚定 CREATE_POOL
+新状态 reserveA_new/reserveB_new >= minReserve
 ```
 
 ---
@@ -193,122 +171,78 @@ lpReserve + 流通 LP 总量 == lpTotalSupply          // 固定总量守恒
 
 ### 5.1 发行 LP-FT
 
-1. `FtManager.genesis(...)` 创建 LP-FT 的 genesis；
-2. `FtManager.mint(...)` 一次性铸造固定总量 `S`，`allowIncreaseMints = false`；
-3. 全部 `S` 由池子创建者持有，在 CREATE_POOL 交易中一次性作为输入使用。
+标准流程：genesis + 一次性 mint 固定总量 S，`allowIncreaseMints = false`。
 
-### 5.2 创建池子（CREATE_POOL）
+### 5.2 CREATE_POOL
 
-CREATE_POOL 不花费池合约 UTXO，只使用普通 FT 转账（`Token.unlock(OP_TRANSFER)` + `TokenTransferCheck`）。
+CREATE_POOL 是普通转账交易（不经过 FtAmmPool.unlock），业务层必须保证：
 
 ```
 输入：
-  0: 创建者 FT-A UTXO（amount = inA）
-  1: 创建者 FT-B UTXO（amount = inB）
-  2: 创建者 LP-FT UTXO（amount = S）
-  3: 矿工费 P2PKH（SPACE）
-  4: TokenTransferCheck_A
-  5: TokenTransferCheck_B
-  6: TokenTransferCheck_LP
+  0: 创建者 FT-A（inA）
+  1: 创建者 FT-B（inB）
+  2: 创建者 LP-FT（S）
+  3: SPACE
+  4-6: TokenTransferCheck_A/B/LP
 
 输出：
-  0: 初始池 UTXO（FtAmmPool，data part：池子Proto + 标准FT数据）
-      - reserveA = inA, reserveB = inB, lpReserve = S - ΔL
-      - tokenAddress = 池 tokenAddress（创建者设定，后续不变）
-      - genesisHash = b'00'*20
-      - genesisTxid = b'00'*36        ← 首次为 0，首次操作时锚定
-  1: FT-A 储备 UTXO（池地址, amount = inA）
-  2: FT-B 储备 UTXO（池地址, amount = inB）
-  3: LP-FT 池内储备 UTXO（池地址, amount = S - ΔL）
-  4: 创建者 LP-FT（amount = ΔL）
+  0: 初始池 UTXO（标准 FT 数据，genesisTxid=0）
+  1: FT-A 储备（池地址, inA）
+  2: FT-B 储备（池地址, inB）
+  3: LP 储备（池地址, S - ΔL）
+  4: 创建者 LP-FT（ΔL）
   5: SPACE 找零
 ```
 
-初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`、`ΔL <= S`。
+初始 `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve`、`ΔL > 0`。
+
+> 业务层责任：CREATE_POOL 必须在同一 tx 内创建池 UTXO 与三枚储备 FT，且每枚储备 FT 恰好一个。
 
 ---
 
 ## 6. AMM 数学
 
-以下全部为**整数运算**，除法向下取整。
+整数运算，除法向下取整。
 
 ### 6.1 SWAP（A → B）
 
 ```
-inA  = 用户投入 FT-A 数量
-reserveA_old, reserveB_old = 旧储备（池 UTXO data part）
-feeBps = 池子构造参数
+effectiveInA = inA * (10000 - feeBps) / 10000
+outB = reserveB_old * effectiveInA / (reserveA_old + effectiveInA)
+reserveA_new = reserveA_old + inA
+reserveB_new = reserveB_old - outB
 
-扣费后的有效输入：
-  effectiveInA = inA * (10000 - feeBps) / 10000
-
-用户获得输出：
-  outB = reserveB_old * effectiveInA / (reserveA_old + effectiveInA)
-
-新储备：
-  reserveA_new = reserveA_old + inA
-  reserveB_new = reserveB_old - outB
-
-合约校验：
-  inA > 0
-  effectiveInA > 0
-  outB > 0
+校验：
+  inA > 0, effectiveInA > 0, outB > 0
   reserveB_new > 0
   reserveA_new >= minReserve
   reserveB_new >= minReserve
   (reserveA_old + effectiveInA) * reserveB_new >= reserveA_old * reserveB_old
 ```
 
-对称地，B → A 交换 A/B 角色。
-
 ### 6.2 ADD_LIQUIDITY
 
 ```
-等比例约束：
-  inA * reserveB_old == inB * reserveA_old
-
-LP 铸造量（池子转出量）：
-  ΔL = min(inA * lpTotalSupply / reserveA_old,
-           inB * lpTotalSupply / reserveB_old)
-
-要求 ΔL > 0 且 ΔL <= lpReserve_old
-
-新状态：
-  reserveA_new = reserveA_old + inA
-  reserveB_new = reserveB_old + inB
-  lpReserve_new = lpReserve_old - ΔL
-
-合约校验：
-  reserveA_new >= minReserve
-  reserveB_new >= minReserve
+inA * reserveB_old == inB * reserveA_old
+ΔL = min(inA*S/reserveA_old, inB*S/reserveB_old)
+ΔL > 0 且 ΔL <= lpReserve_old
+reserveA_new = reserveA_old + inA
+reserveB_new = reserveB_old + inB
+lpReserve_new = lpReserve_old - ΔL
+reserveA_new/reserveB_new >= minReserve
 ```
 
 ### 6.3 REMOVE_LIQUIDITY
 
 ```
-lpReturn = 用户归还的 LP-FT 数量
-
-要求：
-  lpReturn > 0
-  lpReturn <= lpTotalSupply - lpReserve_old
-
-用户获得：
-  outA = lpReturn * reserveA_old / lpTotalSupply
-  outB = lpReturn * reserveB_old / lpTotalSupply
-
-要求 outA > 0 且 outB > 0
-
-新状态：
-  reserveA_new = reserveA_old - outA
-  reserveB_new = reserveB_old - outB
-  lpReserve_new = lpReserve_old + lpReturn
-
-合约校验：
-  reserveA_new >= minReserve
-  reserveB_new >= minReserve
+outA = lpReturn * reserveA_old / S
+outB = lpReturn * reserveB_old / S
+outA > 0, outB > 0
+reserveA_new = reserveA_old - outA
+reserveB_new = reserveB_old - outB
+lpReserve_new = lpReserve_old + lpReturn
+reserveA_new/reserveB_new >= minReserve
 ```
-
-> 溢出防护：所有乘法必须保证结果在 sCrypt `int`（64 位）范围内。
 
 ---
 
@@ -317,11 +251,7 @@ lpReturn = 用户归还的 LP-FT 数量
 ### 7.1 合约概要
 
 ```scrypt
-import "tokenProto.scrypt";
-import "../backtrace.scrypt";
-
 contract FtAmmPool {
-    // 构造参数（code part，不可变）
     bytes tokenACodeHash;
     bytes tokenAID;
     bytes tokenBCodeHash;
@@ -340,49 +270,20 @@ contract FtAmmPool {
         SigHashPreimage txPreimage,
         bytes prevouts,
         int op,
-        // 池内储备 token 输入（金额即当前 reserve，需与 data part 一致）
-        bytes oldTokenAScript,
-        bytes oldTokenBScript,
-        bytes oldLpScript,
-        TxOutputProof proofA,
-        TxOutputProof proofB,
-        TxOutputProof proofLp,
-        int reserveAInputIndex,
-        int reserveBInputIndex,
-        int lpInputIndex,
-        // 用户输入
-        bytes userTokenScriptA,
-        bytes userTokenScriptB,
-        TxOutputProof userProofA,
-        TxOutputProof userProofB,
-        int userInputIndexA,
-        int userInputIndexB,
-        int amountAIn,
-        int amountBIn,
-        bytes userAddress,
-        int amountAOut,
-        int amountBOut,
-        int lpMint,
-        int lpReturn,
-        // 输出索引
-        int poolUtxoOutIndex,
-        int reserveAOutIndex,
-        int reserveBOutIndex,
-        int lpReserveOutIndex,
-        int userAOutIndex,
-        int userBOutIndex,
-        int lpUserOutIndex,
+        bytes oldTokenAScript, bytes oldTokenBScript, bytes oldLpScript,
+        TxOutputProof proofA, TxOutputProof proofB, TxOutputProof proofLp,
+        int reserveAInputIndex, int reserveBInputIndex, int lpInputIndex,
+        bytes userTokenScriptA, bytes userTokenScriptB,
+        TxOutputProof userProofA, TxOutputProof userProofB,
+        int userInputIndexA, int userInputIndexB,
+        int amountAIn, int amountBIn, bytes userAddress,
+        int amountAOut, int amountBOut, int lpMint, int lpReturn,
         bytes changeOutput,
-        int lpReturnInputIndex,
-        bytes oldLpUserScript,
-        TxOutputProof lpUserProof,
-        // TokenGenesis 链式更新证明
-        bytes poolTxHeader,
-        int prevPoolInputIndex,
-        TxInputProof poolTxInputProof,
-        bytes prevPoolTxHeader,
-        bytes prevPoolTxOutputHashProof,
-        bytes prevPoolTxOutputSatoshiBytes
+        int lpReturnInputIndex, bytes oldLpUserScript, TxOutputProof lpUserProof,
+        int poolSatoshis, int reserveASatoshis, int reserveBSatoshis,
+        int lpReserveSatoshis, int userASatoshis, int userBSatoshis, int lpUserSatoshis,
+        bytes poolTxHeader, int prevPoolInputIndex, TxInputProof poolTxInputProof,
+        bytes prevPoolTxHeader, bytes prevPoolTxOutputHashProof, bytes prevPoolTxOutputSatoshiBytes
     ) { ... }
 }
 ```
@@ -390,93 +291,56 @@ contract FtAmmPool {
 ### 7.2 核心校验逻辑（伪代码）
 
 ```
-// ========== 0. 读取池 UTXO 自身脚本 ==========
 bytes poolScript = SigHash.scriptCode(txPreimage);
 int poolScriptLen = len(poolScript);
-
-// 读取池 tokenAddress（用于保证 input/output 一致）
 bytes poolTokenAddress = TokenProto.getTokenAddress(poolScript, poolScriptLen);
 
-// ========== 1. TokenGenesis 链式更新 ==========
+// TokenGenesis 链式更新（genesisTxid 0 → CREATE_POOL outpoint，后续 Backtrace）
 bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
 bytes thisOutpoint = SigHash.outpoint(txPreimage);
-bool isFirst = (genesisTxid == b'00' * 36);
-if (isFirst) {
-    genesisTxid = thisOutpoint;              // 锚定 CREATE_POOL outpoint
-}
-if (!isFirst) {
-    // Backtrace 回溯：当前池 UTXO 必须来自合法的池链
-    bytes prevScriptHash = sha256(poolScript);
-    TxOutputProof prevPoolTxProof = {
-        prevPoolTxHeader, prevPoolTxOutputHashProof,
-        prevPoolTxOutputSatoshiBytes, prevScriptHash
-    };
-    Backtrace.verify(
-        thisOutpoint,
-        poolTxHeader,
-        prevPoolInputIndex,
-        prevPoolTxProof,
-        genesisTxid,
-        poolTxInputProof
-    );
+if (genesisTxid == NULL_GENESIS_TXID) {
+    genesisTxid = thisOutpoint;
+} else {
+    Backtrace.verify(...);   // 防伪造池
 }
 
-// ========== 2. 从池子 Proto 读取旧状态 ==========
-int reserveA_old = <从池子Proto读 reserveA>;
-int reserveB_old = <从池子Proto读 reserveB>;
-int lpReserve_old = <从池子Proto读 lpReserve>;
-require(reserveA_old >= this.minReserve);
-require(reserveB_old >= this.minReserve);
+bytes poolAddress = hash160(poolScript);
+bytes poolTxid = SigHash.outpoint(txPreimage)[:32];
 
-// ========== 3. 校验池内储备 FT 输入 ==========
-// 每个储备 FT 的 tokenAddress == 当前池地址（hash160(poolScript)）
-// 且金额 == reserveA_old / reserveB_old / lpReserve_old
+// 储备 FT 输入真实性 + 同 tx 绑定 + 读金额
 TxUtil.verifyTxOutput(proofA, prevouts[reserveAInputIndex]);
 TxUtil.verifyTxOutput(proofB, prevouts[reserveBInputIndex]);
 TxUtil.verifyTxOutput(proofLp, prevouts[lpInputIndex]);
-require(TokenProto.getTokenID(oldTokenAScript) == this.tokenAID);
-require(TokenProto.getTokenAddress(oldTokenAScript) == hash160(poolScript));
-require(TokenProto.getTokenAmount(oldTokenAScript) == reserveA_old);
-// ... B / LP 同理
+require(prevouts[reserveAInputIndex][:32] == poolTxid);   // 必须与旧池同 tx
+require(prevouts[reserveBInputIndex][:32] == poolTxid);
+require(prevouts[lpInputIndex][:32] == poolTxid);
 
-// ========== 4. 按操作执行 AMM 逻辑（同 v1.2） ==========
-// SWAP / ADD / REMOVE，计算 newReserveA/newReserveB/newLpReserve
+require(TokenProto.getTokenID(oldTokenAScript) == tokenAID);
+require(TokenProto.getTokenAddress(oldTokenAScript) == poolAddress);
+int reserveA_old = TokenProto.getTokenAmount(oldTokenAScript);
+// B / LP 同理
 
-// ========== 5. 构造新池 UTXO 脚本 ==========
-// 5.1 genesisTxid 更新（首次写入 thisOutpoint，之后保持不变）
+// AMM 逻辑（SWAP/ADD/REMOVE）
+// ... 计算 newReserveA/newReserveB/newLpReserve
+require(newReserveA >= this.minReserve);
+require(newReserveB >= this.minReserve);
+
+// 新池 UTXO 脚本 = 旧池脚本（仅 genesisTxid 首次更新），data part 不含 reserve
 bytes newPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, genesisTxid);
-// 5.2 更新池子 Proto（reserveA/B/lpReserve）
-bytes newDataPart = buildPoolDataPart(
-    newReserveA, newReserveB, newLpReserve,
-    poolTokenAddress,               // 沿用 input 的 tokenAddress，保证不变
-    TokenProto.getTokenMetaData(poolScript, poolScriptLen),
-    genesisTxid
-);
-bytes newPoolScript = updateDataPart(newPoolScript, newDataPart);
-// 地址不变：output 池 UTXO 的 tokenAddress 必须与 input 一致
 require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAddress);
 
-// ========== 6. 输出构造与 hashOutputs ==========
-bytes outputs = buildOutput(newPoolScript, poolSatoshis);   // 新池 UTXO
-outputs += buildOutput(新FT-A储备, satoshisA);
-outputs += buildOutput(新FT-B储备, satoshisB);
-outputs += buildOutput(新LP储备, satoshisLp);
-outputs += 用户输出;
-outputs += changeOutput;
-require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
-require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
+// 输出构造 + hashOutputs + SIGHASH_ALL
 ```
 
 ### 7.3 关键设计点
 
-1. **状态在池 UTXO data part**：`reserveA/B/lpReserve` 从池 UTXO 自身脚本读取，而不是从任意 FT UTXO 读取，杜绝“用捐赠/额外 FT UTXO 冒充储备”的攻击。
-2. **TokenGenesis 链式更新**：`genesisTxid` 首次锚定 CREATE_POOL outpoint，之后每次更新 Backtrace 回溯，伪造池 UTXO 无法通过。
-3. **池 tokenAddress 不变**：读取 input 池 UTXO 的 `tokenAddress`，构造 output 时沿用并校验两者一致，地址标识不可变。
-4. **标准 FT 数据在末尾**：现有索引器无需改动即可识别池 UTXO 为 FT，通过稳定的池 tokenAddress 找回。
-5. **池子 Proto 独立成段**：索引器不识别，业务层从 txHex 剥离末尾 172 字节后解析。
-6. **用户输入必须非池地址（H1）**：所有用户输入 `tokenAddress != 池地址`。
-7. **输出地址绑定输入 owner（L2）**。
-8. **最小储备（M1，校验新状态）**、**溢出防护（M2）**、**LP 总量固定**。
+1. **同 tx 绑定**：储备 FT 的 prevout txid 必须等于旧池 UTXO 的 prevout txid，第三方转入/捐赠 UTXO 无法参与；
+2. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
+3. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
+4. **tokenAddress 不变**：input/output 一致；
+5. **标准 FT 数据在末尾**：现有索引器可找回；
+6. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
+7. **最小储备只校验新状态（M1）**。
 
 ---
 
@@ -486,77 +350,44 @@ require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
 
 ```
 输入：
-  0: 旧池 UTXO（data part：旧 reserve）
-  1: FT-A 储备 UTXO（amount = reserveA_old）
-  2: FT-B 储备 UTXO（amount = reserveB_old）
-  3: LP-FT 池内储备 UTXO（amount = lpReserve_old）
-  4: 用户 FT-A 输入（amountAIn）
-  5: 矿工费 P2PKH（SPACE）
-  6: TokenUnlockContractCheck_A
-  7: TokenUnlockContractCheck_B
-  8: TokenUnlockContractCheck_LP
+  0: 旧池 UTXO
+  1: FT-A 储备（旧池同 tx）
+  2: FT-B 储备（旧池同 tx）
+  3: LP 储备（旧池同 tx）
+  4: 用户 FT-A
+  5: SPACE
+  6-8: TokenUnlockContractCheck_A/B/LP
 
 输出：
-  0: 新池 UTXO（池子Proto 更新 + genesisTxid 链式更新 + tokenAddress 不变）
-  1: 新 FT-A 储备 UTXO（池地址, reserveA_new）
-  2: 新 FT-B 储备 UTXO（池地址, reserveB_new）
-  3: 新 LP-FT 储备 UTXO（池地址, lpReserve 不变）
-  4: 用户 FT-B 输出（amountBOut）
+  0: 新池 UTXO（脚本基本不变）
+  1: 新 FT-A 储备（池地址）
+  2: 新 FT-B 储备（池地址）
+  3: 新 LP 储备（池地址）
+  4: 用户 FT-B
   5: SPACE 找零
 ```
 
 ### 8.2 ADD_LIQUIDITY
 
 ```
-输入：
-  0: 旧池 UTXO
-  1: FT-A 储备
-  2: FT-B 储备
-  3: LP-FT 池内储备
-  4: 用户 FT-A 输入
-  5: 用户 FT-B 输入
-  6: SPACE
-  7-9: TokenUnlockContractCheck_A/B/LP
-
-输出：
-  0: 新池 UTXO
-  1: 新 FT-A 储备
-  2: 新 FT-B 储备
-  3: 新 LP-FT 储备（lpReserve - lpMint）
-  4: 用户 LP-FT（lpMint）
-  5: SPACE 找零
+输入：0 旧池, 1-3 储备, 4-5 用户 A/B, 6 SPACE, 7-9 amountCheck
+输出：0 新池, 1-2 新储备 A/B, 3 新 LP 储备(lpReserve-lpMint), 4 用户 LP, 5 找零
 ```
 
 ### 8.3 REMOVE_LIQUIDITY
 
 ```
-输入：
-  0: 旧池 UTXO
-  1: FT-A 储备
-  2: FT-B 储备
-  3: LP-FT 池内储备
-  4: 用户 LP-FT（lpReturn）
-  5: SPACE
-  6-8: TokenUnlockContractCheck_A/B/LP
-
-输出：
-  0: 新池 UTXO
-  1: 新 FT-A 储备
-  2: 新 FT-B 储备
-  3: 新 LP-FT 储备（lpReserve + lpReturn）
-  4: 用户 FT-A（outA）
-  5: 用户 FT-B（outB）
-  6: SPACE 找零
+输入：0 旧池, 1-3 储备, 4 用户 LP, 5 SPACE, 6-8 amountCheck
+输出：0 新池, 1-2 新储备 A/B, 3 新 LP 储备(lpReserve+lpReturn), 4 用户 FT-A, 5 用户 FT-B, 6 找零
 ```
 
 ### 8.4 通用约束
 
-- 每次操作必须包含**且仅包含一个**旧池 UTXO 输入，并输出一个**新池 UTXO**（data part 更新）；
-- 所有交易使用 `SIGHASH_ALL`；
-- 池内 FT 只能由当前池合约解锁（`Token.unlock(OP_UNLOCK_FROM_CONTRACT)`，`contractInputIndex = 0`）；
-- 用户输入必须非池地址（H1）；
-- 输出地址绑定输入 owner（L2）；
-- 每次操作都需要提供 TokenGenesis 链式更新证明（首次操作证明可简化）。
+- 每次操作恰好一个旧池输入 + 一个新池输出；
+- 储备 FT 必须与池 UTXO 同 tx（合约强制）；
+- 所有交易 SIGHASH_ALL；
+- 池内 FT 只能由当前池合约解锁；
+- 用户输入非池地址（H1）、输出绑定 owner（L2）。
 
 ---
 
@@ -564,14 +395,13 @@ require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
 
 | 组件 | 复用方式 |
 |---|---|
-| `Token` / `token-v2` | 池内 FT 解锁、用户 FT 解锁、LP-FT 解锁 |
-| `TokenUnlockContractCheck` | SWAP/ADD/REMOVE 中 FT-A/B/LP 守恒校验 |
-| `TokenTransferCheck` | CREATE_POOL 创建交易守恒校验 |
-| `TokenGenesis` | **池 UTXO 链式更新模式（genesisTxid + Backtrace）** |
-| `Backtrace` | 池 UTXO 链回溯验证 |
-| `TokenProto` | FT 脚本解析/构造：`getTokenAddress`、`getTokenAmount`、`getNewGenesisScript` 等 |
-| `TxUtil` / `TxOutputProof` | 验证池内储备 FT、用户 FT 输入真实存在 |
-| `FtManager.transfer` | CREATE_POOL 创建者把 FT-A/B/LP 转入池地址 |
+| `Token` / `token-v2` | 储备 FT / 用户 FT / LP 解锁 |
+| `TokenUnlockContractCheck` | FT-A/B/LP 守恒校验 |
+| `TokenTransferCheck` | CREATE_POOL 守恒校验 |
+| `TokenGenesis` | 池 UTXO 链式更新模式 |
+| `Backtrace` | 池 UTXO 回溯 |
+| `TokenProto` | FT 脚本解析/构造 |
+| `TxUtil` / `TxOutputProof` | 输入真实性验证 |
 
 ---
 
@@ -579,74 +409,72 @@ require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
 
 ### 10.1 资产安全
 
-1. **FT 守恒双保险**：`TokenUnlockContractCheck` + 池合约 `hashOutputs`。
-2. **状态唯一且锚定**：`reserveA/B/lpReserve` 只存在于池 UTXO data part；伪造/额外 FT UTXO 不能冒充储备。
-3. **池 UTXO 链防伪造**：`genesisTxid` + `Backtrace.verify` 保证只有合法池链上的 UTXO 才能更新。
-4. **池 tokenAddress 不变**：合约保证每次更新 input/output 一致，索引器检索键稳定。
-5. **用户输入隔离（H1）**：拒绝 `tokenAddress == 池地址` 的用户输入。
-6. **输出地址绑定（L2）**：用户输出只能发往输入 owner。
+1. FT 守恒双保险：amountCheck + hashOutputs；
+2. **同 tx 绑定**：储备 FT 必须与旧池同 tx，捐赠/第三方转入 UTXO 不能参与；
+3. **池 UTXO 链防伪造**：Backtrace；
+4. **池 tokenAddress 不变**：input/output 一致；
+5. H1 / L2。
 
 ### 10.2 经济安全
 
-1. **k 不减少（含手续费）**。
-2. **等比例 add**。
-3. **remove 取整归池**。
-4. **LP 总量固定**。
-5. **最小储备（M1，校验新状态）**。
-6. **溢出防护（M2）**。
+1. k 不减少（含手续费）；
+2. 等比例 add；
+3. remove 取整归池；
+4. LP 总量固定；
+5. 最小储备（M1，校验新状态）；
+6. 溢出防护（M2）。
 
-### 10.3 已知限制（非漏洞）
+### 10.3 已知限制
 
-- 内存池抢跑/三明治攻击需业务层缓解；
-- LP 储备耗尽时暂时无法 add，remove 后可回收；
-- 池 UTXO satoshi 面值不保护（dust = 1 sat）；
-- 池 UTXO 的 `codeHash`（旧索引器视角）随池子 Proto 变化，**不能用于定位**，定位靠稳定的池 tokenAddress；
-- 直接向池地址转账的 FT 为捐赠，不计入 reserve。
+- 内存池抢跑/三明治需业务层缓解；
+- CREATE_POOL 初始布局由业务层保证（合约不参与）；
+- 同参数多池共享地址：需靠 genesisTxid 链区分，或后续加 salt；
+- 捐赠 UTXO 存在但不参与操作，索引器需忽略；
+- 池 UTXO `codeHash`（旧索引器视角）不用于定位，定位靠 tokenAddress。
 
 ---
 
 ## 11. 索引与找回
 
-### 11.1 池 UTXO 的索引兼容
+### 11.1 池 UTXO
 
 池 UTXO 末尾是标准 MCP02 FT 数据：
 
 ```
 protoType = 1 (FT)
-tokenAddress = 池 tokenAddress（CREATE_POOL 设定，后续不变）
-tokenName/symbol/decimal = 池元数据
-tokenAmount = 任意值（建议 lpReserve）
+tokenAddress = 池 tokenAddress（稳定）
+tokenName/symbol = 池元数据
 genesisHash/genesisTxid = 池链标识
 ```
 
-现有索引器 `TxDecoder`：
+现有索引器识别为 `SENSIBLE_FT` 并写入 `tx_out_ft`。
 
-- `hasProtoFlag` ✅
-- `protoType == 1` ✅
-- `FtManager.parseTokenScript` ✅
-- 写入 `tx_out_ft` ✅
-
-### 11.2 找回方式
+### 11.2 找回池 UTXO
 
 | 查询 | 用途 |
 |---|---|
-| `/contract/ft/address/{池tokenAddress}/utxo` | 找回所有池 UTXO（所有池、所有状态） |
-| `/contract/ft/address/{池tokenAddress}/utxo?genesis={池ID}` | 找回指定池子的 UTXO |
-| 过滤 `is_used=false` 取最新 | 当前池 UTXO |
+| `/contract/ft/address/{池tokenAddress}/utxo` | 找回所有池 UTXO |
+| `?genesis={池ID}` | 指定池子 |
+| `is_used=false` 取最新 | 当前池 UTXO |
 
-### 11.3 业务层解析池状态
+### 11.3 业务层读取储备
 
-1. 用池 tokenAddress（+ genesis 过滤）找到池 UTXO；
-2. 通过 `/tx/{txid}` 获取 txHex；
-3. 定位池 UTXO 输出，取锁定脚本；
-4. 剥离末尾 172 字节标准 FT 数据；
-5. 用 `ftAmmPool.proto.parseDataPart` 解析池子 Proto（reserveA/B/lpReserve）。
+1. 找到当前池 UTXO；
+2. 取它的创建 tx（`txid` 即池 UTXO 的 prevout txid）；
+3. 在该 tx 输出中找池地址下的 FT-A/B/LP，读 `tokenAmount`；
+4. 得到 `reserveA/reserveB/lpReserve`。
 
-### 11.4 索引器可选升级（后续）
+也可以直接用索引器：
 
-- `protoheader.ts` 增加 `PROTO_TYPE.AMM_POOL = 4`；
-- `TxDecoder` 增加 `SENSIBLE_AMM_POOL` 分支；
-- 新增 `tx_out_amm_pool` 表，直接索引池子 Proto。
+```
+/contract/ft/address/{池地址}/utxo?codeHash={FT-A codehash}&genesis={FT-A genesis}
+过滤 txid == 池UTXO.txid
+```
+
+### 11.4 索引器可选升级
+
+- `tx_out_amm_pool` 表，直接记录池身份/储备；
+- `/contract/amm/...` 端点。
 
 ---
 
@@ -654,67 +482,47 @@ genesisHash/genesisTxid = 池链标识
 
 | 场景 | 合约行为 |
 |---|---|
-| `inA <= 0` / `outB <= 0` | `require(false)` 拒绝 |
-| `effectiveInA <= 0` | 拒绝（提示增大金额） |
-| `feeBps` 非法 | 拒绝 |
-| swap 后 `reserveB_new <= 0` | 拒绝（不允许抽干池子） |
-| 新状态 `reserveA_new/reserveB_new < minReserve` | 拒绝（M1，操作后池子必须保持健康） |
-| add 比例不满足 | 拒绝 |
-| 用户输入 `tokenAddress == 池地址` | 拒绝（H1） |
+| 储备 FT 与旧池不同 tx | 拒绝（同 tx 绑定） |
+| 储备 FT 地址 != 池地址 | 拒绝 |
+| 新状态 `reserveA_new/B_new < minReserve` | 拒绝（M1） |
+| 用户输入 tokenAddress == 池地址 | 拒绝（H1） |
 | 用户输出地址 != 输入 owner | 拒绝（L2） |
-| `lpMint > lpReserve` | 拒绝 |
-| `lpReturn > lpTotalSupply - lpReserve` | 拒绝 |
-| remove 后 `outA == 0` 或 `outB == 0` | 拒绝 |
-| 池 UTXO 的 tokenAddress 变化（input != output） | 拒绝 |
-| 池 UTXO Backtrace 不通过 | 拒绝（防伪造池） |
-| 储备 FT 金额 != data part 中的 reserve | 拒绝 |
-| 乘法结果超出 64 位 | 拒绝（M2） |
-| `lpTokenID == tokenAID/tokenBID`、LP 可增发 | 部署层拒绝 |
+| 池 UTXO tokenAddress 变化 | 拒绝 |
+| Backtrace 不通过 | 拒绝（防伪造池） |
+| swap 后 reserveB_new <= 0 | 拒绝 |
+| add 比例不满足 | 拒绝 |
+| lpMint > lpReserve / lpReturn 超流通 | 拒绝 |
+| 乘法溢出 | 拒绝（M2） |
 
 ---
 
 ## 13. 限制与后续演进
 
-### 13.1 方案 A v2.0 的限制
+### 13.1 限制
 
-1. **池地址随状态迁移**：索引器/业务层需要跟随池 UTXO 链，不能按固定地址查储备；
-2. **LP 总量硬上限**：`lpReserve` 耗尽后不能再 add，remove 后可回收；
-3. **无路由/多跳**、**无闪贷**；
-4. **池 UTXO satoshi 面值不保护**；
-5. **旧索引器只能找回池 UTXO，不能直接读池状态**（业务层需解析 txHex）。
+1. CREATE_POOL 初始布局靠业务层；
+2. LP 总量硬上限；
+3. 无路由/无闪贷；
+4. 同参数多池共享地址（可用 salt 解决）；
+5. 旧索引器只能找回池 UTXO，读储备要查创建 tx。
 
 ### 13.2 后续演进
 
-- **索引器 AMM_POOL 原生支持**（`tx_out_amm_pool` 表）；
-- **方案 B（动态铸币）**：扩展 TokenGenesis 支持 `OP_MINT_FROM_CONTRACT`；
-- **手续费分级**；
-- **LP 分红**；
-- **价格预言机**；
-- **OP_SWEEP** 合并捐赠 UTXO。
+- 加 salt 保证每池地址唯一；
+- 索引器 AMM_POOL 原生支持；
+- 方案 B 动态铸币；
+- OP_SWEEP 处理捐赠 UTXO。
 
 ---
 
 ## 14. 实现路线
 
-| 步骤 | 内容 |
-|---|---|
-| 1 | 更新 `protoheader.ts`：新增 `AMM_POOL = 4`（可选，先不用于池 UTXO 伪装） |
-| 2 | 新增 `src/mcp02/contract/amm/ftAmmPool.scrypt`（AMM 逻辑 + Backtrace 链 + tokenAddress input/output 一致） |
-| 3 | 新增 `src/mcp02/contract-proto/ftAmmPool.proto.ts`（池子 Proto 构造/解析 + 标准 FT 数据复用） |
-| 4 | 新增 `src/mcp02/contract-factory/ftAmmPool.ts` |
-| 5 | 运行 `npm run compile-mcp02` 生成 `contract-desc/ftAmmPool_desc.json` |
-| 6 | 新增 `tests/scrypt/ftAmmPool.scrypttest.ts`：<br>— CREATE_POOL 初始化<br>— SWAP 恒定乘积/手续费<br>— ADD 等比例/LP 转出<br>— REMOVE 按比例赎回/LP 合并<br>— tokenAddress 不可变<br>— Backtrace 链：首次锚定、后续回溯、伪造失败<br>— H1/L2/M1/M2 边界 |
-| 7 | `FtManager` 增加 SDK 接口：`createPool/addLiquidity/removeLiquidity/swap` |
-| 8 | 索引器扩展（可选）：`tx_out_amm_pool` 表 + `/contract/amm/...` 端点 |
-
----
-
-## 附录：LP-FT 关键公式速查
-
-| 操作 | 公式 |
-|---|---|
-| CREATE_POOL 初始 LP | `ΔL = min(inA, inB)`，要求 `inA/inB >= minReserve` |
-| add | `ΔL = min(inA·S/reserveA, inB·S/reserveB)`，且 `inA·reserveB == inB·reserveA` |
-| swap A→B | `eff = inA·(10000-feeBps)/10000`，`outB = reserveB·eff/(reserveA+eff)`，`reserveA += inA` |
-| remove | `outA = lpReturn·reserveA/S`，`outB = lpReturn·reserveB/S`，`lpReserve += lpReturn` |
-| 池内 LP 储备 | `lpReserve = S - 流通量` |
+| 步骤 | 内容 | 状态 |
+|---|---|---|
+| 1 | 设计文档 v3.0 | ✅ |
+| 2 | `ftAmmPool.scrypt`（同 tx 绑定 + AMM + Backtrace） | ✅ |
+| 3 | `ftAmmPool.proto.ts`（标准 FT 数据） | ✅ |
+| 4 | `ftAmmPool.ts` Factory | ✅ |
+| 5 | 编译 desc + 数据部测试 | ✅ |
+| 6 | 完整 unlock 测试（SWAP/ADD/REMOVE/同tx绑定/Backtrace） | 待做 |
+| 7 | `FtManager` SDK 接口 | 待做 |

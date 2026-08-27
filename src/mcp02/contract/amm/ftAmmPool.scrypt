@@ -1,0 +1,308 @@
+import "../token/tokenProto.scrypt";
+import "../protoheader.scrypt";
+import "../txUtil.scrypt";
+import "../backtrace.scrypt";
+
+/**
+ * FtAmmPool：MCP02 FT-FT 恒定乘积 AMM 池（方案 A v2.0）
+ *
+ * 设计要点：
+ * - 池状态（reserveA/reserveB/lpReserve）写入池 UTXO data part 的"池子 Proto"段；
+ * - 池 UTXO 末尾保留标准 MCP02 FT 数据（172 字节），tokenAddress 固定为官方地址，
+ *   现有索引器可将其识别为普通 FT 并通过官方地址找回；
+ * - 池 UTXO 采用 TokenGenesis 链式更新：genesisTxid 首次锚定 CREATE_POOL outpoint，
+ *   后续每次操作通过 Backtrace.verify 回溯，防止伪造池 UTXO；
+ * - 官方 tokenAddress 不可变，合约强制。
+ */
+contract FtAmmPool {
+    // 构造参数（不可变，写入 code part）
+    bytes tokenACodeHash;
+    bytes tokenAID;
+    bytes tokenBCodeHash;
+    bytes tokenBID;
+    bytes lpTokenCodeHash;
+    bytes lpTokenID;
+    int lpTotalSupply;
+    int minReserve;
+    int feeBps;
+    bytes officialAddress;
+
+    static const int OP_SWAP = 1;
+    static const int OP_ADD = 2;
+    static const int OP_REMOVE = 3;
+
+    // data part 布局：<池子Proto(24)> + <标准FT数据(172)>
+    static const int POOL_PROTO_LEN = 24;
+    static const int FT_DATA_LEN = TokenProto.DATA_LEN;
+    static const int POOL_TAIL_LEN = POOL_PROTO_LEN + FT_DATA_LEN;
+
+    public function unlock(
+        SigHashPreimage txPreimage,
+        bytes prevouts,
+        int op,
+        // 池内储备 FT 输入
+        bytes oldTokenAScript,
+        bytes oldTokenBScript,
+        bytes oldLpScript,
+        TxOutputProof proofA,
+        TxOutputProof proofB,
+        TxOutputProof proofLp,
+        int reserveAInputIndex,
+        int reserveBInputIndex,
+        int lpInputIndex,
+        // 用户输入
+        bytes userTokenScriptA,
+        bytes userTokenScriptB,
+        TxOutputProof userProofA,
+        TxOutputProof userProofB,
+        int userInputIndexA,
+        int userInputIndexB,
+        int amountAIn,
+        int amountBIn,
+        bytes userAddress,
+        // 输出金额
+        int amountAOut,
+        int amountBOut,
+        int lpMint,
+        int lpReturn,
+        bytes changeOutput,
+        // remove 用：用户 LP 输入
+        int lpReturnInputIndex,
+        bytes oldLpUserScript,
+        TxOutputProof lpUserProof,
+        // 输出 satoshis
+        int poolSatoshis,
+        int reserveASatoshis,
+        int reserveBSatoshis,
+        int lpReserveSatoshis,
+        int userASatoshis,
+        int userBSatoshis,
+        int lpUserSatoshis,
+        // TokenGenesis 链式更新证明
+        bytes poolTxHeader,
+        int prevPoolInputIndex,
+        TxInputProof poolTxInputProof,
+        bytes prevPoolTxHeader,
+        bytes prevPoolTxOutputHashProof,
+        bytes prevPoolTxOutputSatoshiBytes
+    ) {
+        require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
+
+        bytes poolScript = SigHash.scriptCode(txPreimage);
+        int poolScriptLen = len(poolScript);
+
+        // ========== 官方 tokenAddress 不可变 ==========
+        require(TokenProto.getTokenAddress(poolScript, poolScriptLen) == this.officialAddress);
+
+        // ========== TokenGenesis 链式更新 ==========
+        bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
+        bytes thisOutpoint = SigHash.outpoint(txPreimage);
+        bool isFirst = false;
+        if (genesisTxid == ProtoHeader.NULL_GENESIS_TXID) {
+            isFirst = true;
+            genesisTxid = thisOutpoint;
+        }
+        if (!isFirst) {
+            bytes prevScriptHash = sha256(poolScript);
+            TxOutputProof prevPoolTxProof = {
+                prevPoolTxHeader,
+                prevPoolTxOutputHashProof,
+                prevPoolTxOutputSatoshiBytes,
+                prevScriptHash
+            };
+            Backtrace.verify(
+                thisOutpoint,
+                poolTxHeader,
+                prevPoolInputIndex,
+                prevPoolTxProof,
+                genesisTxid,
+                poolTxInputProof
+            );
+        }
+
+        // ========== 读取池子 Proto（旧状态） ==========
+        bytes poolProto = poolScript[poolScriptLen - POOL_TAIL_LEN : poolScriptLen - FT_DATA_LEN];
+        int reserveA_old = Utils.fromLEUnsigned(poolProto[0 : 8]);
+        int reserveB_old = Utils.fromLEUnsigned(poolProto[8 : 16]);
+        int lpReserve_old = Utils.fromLEUnsigned(poolProto[16 : 24]);
+
+        require(reserveA_old >= this.minReserve);
+        require(reserveB_old >= this.minReserve);
+
+        // ========== 校验池内储备 FT 输入 ==========
+        bytes poolAddress = hash160(poolScript);
+
+        TxUtil.verifyTxOutput(proofA, prevouts[reserveAInputIndex * TxUtil.OUTPOINT_LEN : (reserveAInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+        TxUtil.verifyTxOutput(proofB, prevouts[reserveBInputIndex * TxUtil.OUTPOINT_LEN : (reserveBInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+        TxUtil.verifyTxOutput(proofLp, prevouts[lpInputIndex * TxUtil.OUTPOINT_LEN : (lpInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+
+        int oldTokenAScriptLen = len(oldTokenAScript);
+        int oldTokenBScriptLen = len(oldTokenBScript);
+        int oldLpScriptLen = len(oldLpScript);
+
+        require(TokenProto.getTokenID(oldTokenAScript, oldTokenAScriptLen) == this.tokenAID);
+        require(TokenProto.getScriptCodeHash(oldTokenAScript, oldTokenAScriptLen) == this.tokenACodeHash);
+        require(TokenProto.getTokenAddress(oldTokenAScript, oldTokenAScriptLen) == poolAddress);
+        require(TokenProto.getTokenAmount(oldTokenAScript, oldTokenAScriptLen) == reserveA_old);
+
+        require(TokenProto.getTokenID(oldTokenBScript, oldTokenBScriptLen) == this.tokenBID);
+        require(TokenProto.getScriptCodeHash(oldTokenBScript, oldTokenBScriptLen) == this.tokenBCodeHash);
+        require(TokenProto.getTokenAddress(oldTokenBScript, oldTokenBScriptLen) == poolAddress);
+        require(TokenProto.getTokenAmount(oldTokenBScript, oldTokenBScriptLen) == reserveB_old);
+
+        require(TokenProto.getTokenID(oldLpScript, oldLpScriptLen) == this.lpTokenID);
+        require(TokenProto.getTokenAddress(oldLpScript, oldLpScriptLen) == poolAddress);
+        require(TokenProto.getTokenAmount(oldLpScript, oldLpScriptLen) == lpReserve_old);
+
+        // ========== AMM 逻辑 ==========
+        int newReserveA = 0;
+        int newReserveB = 0;
+        int newLpReserve = lpReserve_old;
+        bytes userOutput = b'';
+
+        if (op == OP_SWAP) {
+            // 用户 FT-A 输入校验
+            TxUtil.verifyTxOutput(userProofA, prevouts[userInputIndexA * TxUtil.OUTPOINT_LEN : (userInputIndexA + 1) * TxUtil.OUTPOINT_LEN]);
+            int userTokenScriptALen = len(userTokenScriptA);
+            require(TokenProto.getTokenID(userTokenScriptA, userTokenScriptALen) == this.tokenAID);
+            require(TokenProto.getTokenAmount(userTokenScriptA, userTokenScriptALen) == amountAIn);
+            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) != poolAddress);
+            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) == userAddress);
+
+            require(amountAIn > 0);
+            require(amountBOut > 0);
+
+            int effectiveInA = amountAIn * (10000 - this.feeBps) / 10000;
+            require(effectiveInA > 0);
+
+            newReserveA = reserveA_old + amountAIn;
+            newReserveB = reserveB_old - amountBOut;
+            require(newReserveB > 0);
+            require((reserveA_old + effectiveInA) * newReserveB >= reserveA_old * reserveB_old);
+
+            // 用户 FT-B 输出
+            bytes userBScript = TokenProto.getNewTokenScript(
+                userTokenScriptA,
+                userTokenScriptALen,
+                userAddress,
+                amountBOut
+            );
+            userOutput = Utils.buildOutput(userBScript, userBSatoshis);
+        }
+        else if (op == OP_ADD) {
+            // 用户 FT-A / FT-B 输入校验
+            TxUtil.verifyTxOutput(userProofA, prevouts[userInputIndexA * TxUtil.OUTPOINT_LEN : (userInputIndexA + 1) * TxUtil.OUTPOINT_LEN]);
+            TxUtil.verifyTxOutput(userProofB, prevouts[userInputIndexB * TxUtil.OUTPOINT_LEN : (userInputIndexB + 1) * TxUtil.OUTPOINT_LEN]);
+            int userTokenScriptALen = len(userTokenScriptA);
+            int userTokenScriptBLen = len(userTokenScriptB);
+            require(TokenProto.getTokenID(userTokenScriptA, userTokenScriptALen) == this.tokenAID);
+            require(TokenProto.getTokenID(userTokenScriptB, userTokenScriptBLen) == this.tokenBID);
+            require(TokenProto.getTokenAmount(userTokenScriptA, userTokenScriptALen) == amountAIn);
+            require(TokenProto.getTokenAmount(userTokenScriptB, userTokenScriptBLen) == amountBIn);
+            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) != poolAddress);
+            require(TokenProto.getTokenAddress(userTokenScriptB, userTokenScriptBLen) != poolAddress);
+            require(TokenProto.getTokenAddress(userTokenScriptA, userTokenScriptALen) == userAddress);
+            require(TokenProto.getTokenAddress(userTokenScriptB, userTokenScriptBLen) == userAddress);
+
+            require(amountAIn > 0);
+            require(amountBIn > 0);
+
+            // 等比例约束
+            require(amountAIn * reserveB_old == amountBIn * reserveA_old);
+
+            // LP 铸造量
+            int lpMintA = amountAIn * this.lpTotalSupply / reserveA_old;
+            int lpMintB = amountBIn * this.lpTotalSupply / reserveB_old;
+            int lpMintCalc = lpMintA;
+            if (lpMintB < lpMintA) {
+                lpMintCalc = lpMintB;
+            }
+            require(lpMintCalc > 0);
+            require(lpMintCalc <= lpReserve_old);
+            require(lpMintCalc == lpMint);
+
+            newReserveA = reserveA_old + amountAIn;
+            newReserveB = reserveB_old + amountBIn;
+            newLpReserve = lpReserve_old - lpMintCalc;
+
+            // 用户 LP 输出
+            bytes userLpScript = TokenProto.getNewTokenScript(
+                oldLpScript,
+                oldLpScriptLen,
+                userAddress,
+                lpMintCalc
+            );
+            userOutput = Utils.buildOutput(userLpScript, lpUserSatoshis);
+        }
+        else if (op == OP_REMOVE) {
+            // 用户 LP 输入校验
+            TxUtil.verifyTxOutput(lpUserProof, prevouts[lpReturnInputIndex * TxUtil.OUTPOINT_LEN : (lpReturnInputIndex + 1) * TxUtil.OUTPOINT_LEN]);
+            int oldLpUserScriptLen = len(oldLpUserScript);
+            require(TokenProto.getTokenID(oldLpUserScript, oldLpUserScriptLen) == this.lpTokenID);
+            require(TokenProto.getScriptCodeHash(oldLpUserScript, oldLpUserScriptLen) == this.lpTokenCodeHash);
+            require(TokenProto.getTokenAmount(oldLpUserScript, oldLpUserScriptLen) == lpReturn);
+            require(TokenProto.getTokenAddress(oldLpUserScript, oldLpUserScriptLen) != poolAddress);
+            require(TokenProto.getTokenAddress(oldLpUserScript, oldLpUserScriptLen) == userAddress);
+
+            require(lpReturn > 0);
+            require(lpReturn <= this.lpTotalSupply - lpReserve_old);
+
+            int outA = lpReturn * reserveA_old / this.lpTotalSupply;
+            int outB = lpReturn * reserveB_old / this.lpTotalSupply;
+            require(outA > 0);
+            require(outB > 0);
+            require(outA == amountAOut);
+            require(outB == amountBOut);
+
+            newReserveA = reserveA_old - outA;
+            newReserveB = reserveB_old - outB;
+            newLpReserve = lpReserve_old + lpReturn;
+
+            bytes userAScript = TokenProto.getNewTokenScript(
+                oldTokenAScript,
+                oldTokenAScriptLen,
+                userAddress,
+                outA
+            );
+            bytes userBScript = TokenProto.getNewTokenScript(
+                oldTokenBScript,
+                oldTokenBScriptLen,
+                userAddress,
+                outB
+            );
+            userOutput = Utils.buildOutput(userAScript, userASatoshis) + Utils.buildOutput(userBScript, userBSatoshis);
+        }
+        else {
+            require(false);
+        }
+
+        // ========== 构造新池 UTXO 脚本 ==========
+        // 1. 更新标准 FT 数据中的 genesisTxid（首次写入 thisOutpoint，之后保持不变）
+        bytes tmpPoolScript = TokenProto.getNewGenesisScript(poolScript, poolScriptLen, genesisTxid);
+        // 2. 更新池子 Proto（reserveA/B/lpReserve）
+        bytes codePart = tmpPoolScript[: poolScriptLen - POOL_TAIL_LEN];
+        bytes ftData = tmpPoolScript[poolScriptLen - FT_DATA_LEN :];
+        bytes newPoolProto =
+            Utils.toLEUnsigned(newReserveA, 8) +
+            Utils.toLEUnsigned(newReserveB, 8) +
+            Utils.toLEUnsigned(newLpReserve, 8);
+        bytes newPoolScript = codePart + newPoolProto + ftData;
+
+        // ========== 输出构造 ==========
+        bytes outputs = b'';
+        outputs += Utils.buildOutput(newPoolScript, poolSatoshis);
+
+        bytes newReserveAScript = TokenProto.getNewTokenScript(oldTokenAScript, oldTokenAScriptLen, poolAddress, newReserveA);
+        bytes newReserveBScript = TokenProto.getNewTokenScript(oldTokenBScript, oldTokenBScriptLen, poolAddress, newReserveB);
+        bytes newLpReserveScript = TokenProto.getNewTokenScript(oldLpScript, oldLpScriptLen, poolAddress, newLpReserve);
+
+        outputs += Utils.buildOutput(newReserveAScript, reserveASatoshis);
+        outputs += Utils.buildOutput(newReserveBScript, reserveBSatoshis);
+        outputs += Utils.buildOutput(newLpReserveScript, lpReserveSatoshis);
+        outputs += userOutput;
+        outputs += changeOutput;
+
+        require(hash256(outputs) == SigHash.hashOutputs(txPreimage));
+        require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
+    }
+}

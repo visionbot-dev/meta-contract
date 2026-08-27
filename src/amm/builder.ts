@@ -117,6 +117,9 @@ export function buildCreatePoolScripts({
 
 /**
  * SWAP 输出脚本构造（A→B / B→A）
+ *
+ * ⚠️ `poolAddress` 必须是**新池地址** `hash160(newPoolScript)`：
+ * 首次操作 genesisTxid 从 NULL 变为 CREATE_POOL outpoint 时池地址会改变。
  */
 export function buildSwapOutputScripts({
   oldPoolScript,

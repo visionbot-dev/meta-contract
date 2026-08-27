@@ -369,13 +369,17 @@ contract FtAmmPool {
         // 地址不变：output 池 UTXO 的 tokenAddress 必须与 input 一致
         require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAddress);
 
+        // 新储备必须锁到新池地址：首次操作 genesisTxid 从 NULL 变为 thisOutpoint，
+        // 池脚本 hash160 会改变，若继续用旧 poolAddress 会导致下一次操作无法通过地址校验
+        bytes newPoolAddress = hash160(newPoolScript);
+
         // ========== 输出构造 ==========
         bytes outputs = b'';
         outputs += Utils.buildOutput(newPoolScript, poolSatoshis);
 
-        bytes newReserveAScript = TokenProto.getNewTokenScript(oldTokenAScript, oldTokenAScriptLen, poolAddress, newReserveA);
-        bytes newReserveBScript = TokenProto.getNewTokenScript(oldTokenBScript, oldTokenBScriptLen, poolAddress, newReserveB);
-        bytes newLpReserveScript = TokenProto.getNewTokenScript(oldLpScript, oldLpScriptLen, poolAddress, newLpReserve);
+        bytes newReserveAScript = TokenProto.getNewTokenScript(oldTokenAScript, oldTokenAScriptLen, newPoolAddress, newReserveA);
+        bytes newReserveBScript = TokenProto.getNewTokenScript(oldTokenBScript, oldTokenBScriptLen, newPoolAddress, newReserveB);
+        bytes newLpReserveScript = TokenProto.getNewTokenScript(oldLpScript, oldLpScriptLen, newPoolAddress, newLpReserve);
 
         outputs += Utils.buildOutput(newReserveAScript, reserveASatoshis);
         outputs += Utils.buildOutput(newReserveBScript, reserveBSatoshis);

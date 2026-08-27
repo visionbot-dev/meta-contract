@@ -401,12 +401,13 @@ require(TokenProto.getTokenAddress(newPoolScript, poolScriptLen) == poolTokenAdd
 3. **池脚本走完整脚本**：`poolScript` 必须是完整锁定脚本（含 code part），由 `poolProof.scriptHash` 绑定；不能用 `SigHash.scriptCode`（它只是 OP_CODESEPARATOR 后的片段）；
 4. **无 data part 状态**：reserve 直接从绑定储备 FT 读取，池 UTXO 脚本基本恒定；
 5. **TokenGenesis 链**：genesisTxid + Backtrace 防伪造池；
-6. **tokenAddress 不变**：input/output 一致；
-7. **标准 FT 数据在末尾**：现有索引器可找回；
-8. **储备唯一性靠 outputIndex 绑定**：changeOutput 不限制形态，池地址上的额外 FT 会锁死但无法冒充储备；
-9. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
-10. **最小储备只校验新状态（M1）**；
-11. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
+6. **首次操作后池地址稳定**：genesisTxid 从 NULL 变为 CREATE_POOL outpoint 时，池脚本 hash160（即储备 FT 的 tokenAddress）会变化；**新储备必须锁到 `newPoolAddress = hash160(newPoolScript)`**，之后 genesisTxid 不再变，池地址保持稳定；
+7. **tokenAddress 不变**：池 data part 的 tokenAddress（检索键）input/output 一致；
+8. **标准 FT 数据在末尾**：现有索引器可找回；
+9. **储备唯一性靠 outputIndex 绑定**：changeOutput 不限制形态，池地址上的额外 FT 会锁死但无法冒充储备；
+10. **用户输入非池地址（H1）**、**输出绑定 owner（L2）**；
+11. **最小储备只校验新状态（M1）**；
+12. **溢出防护（M2）**：所有乘法/加法走 safeMul/safeAdd，溢出即拒绝。
 
 ---
 

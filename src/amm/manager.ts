@@ -74,13 +74,13 @@ export type AmmSwapParams = {
    * 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。
    * SDK 自动从该交易解析池/储备（含池构造参数），并复制旧脚本修改 data part 构造新输出。
    */
-  prevPoolTxHex: string
+  currentPoolTxHex: string
   /**
    * 储备 FT 前序交易 hex（SDK 严格不做链上查询，必须显式传入）：
    * - 第一代池（issue 后）：各 token 预锁交易 hex（可传 { A, B, LP }）
    * - 非第一代池：旧池创建交易 hex（单 string，同时用于 Backtrace 证明）
    */
-  reservePreTxHex?: string | { A?: string; B?: string; LP?: string }
+  prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
   /**
    * 用户预存到 UserSigLock 的 FT UTXO（tokenAddress = UserSigLock 合约地址）。
    * SDK 根据该 FT 是 A 还是 B 自动判断 swap 方向，金额 = 该 FT 余额（全部投入）。
@@ -863,8 +863,8 @@ export class FtAmmPoolManager extends FtManager {
    */
   public async swap(params: AmmSwapParams): Promise<AmmOpResult> {
     const {
+      currentPoolTxHex,
       prevPoolTxHex,
-      reservePreTxHex,
       userSigLockUtxo: userSigLockFtUtxo,
       userSigLockContractUtxo,
       utxos,
@@ -878,10 +878,10 @@ export class FtAmmPoolManager extends FtManager {
     // SPACE 手续费/找零输入：业务层显式传入
     const utxoInfo = prepareUtxos(utxos)
 
-    // 从 prevPoolTxHex（创建当前池 UTXO 的交易）自动解析池、储备与池构造参数
-    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(prevPoolTxHex)
+    // 从 currentPoolTxHex（创建当前池 UTXO 的交易）自动解析池、储备与池构造参数
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(currentPoolTxHex)
     const poolParams = parsePoolParamsFromScript(poolScript)
-    const { ftA, ftB, ftLp } = await this._resolveReserves(prevPoolTxHex, reservePreTxHex)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(currentPoolTxHex, prevPoolTxHex)
     const ftU = (await this._pretreatAndPerfect(userSigLockFtUtxo)).ft
     const userUtxo = userSigLockFtUtxo
 
@@ -1069,10 +1069,10 @@ export class FtAmmPoolManager extends FtManager {
     const isGenesisPool =
       !!genesisData && poolTx.inputs[0].prevTxId.toString('hex') === genesisData.txid && poolTx.inputs[0].outputIndex === genesisData.index
     if (!isGenesisPool) {
-      if (typeof reservePreTxHex !== 'string') {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, reservePreTxHex (old pool creation tx hex) is required for Backtrace proof.')
+      if (typeof prevPoolTxHex !== 'string') {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex (old pool creation tx hex) is required for Backtrace proof.')
       }
-      const prevPoolTx = new mvc.Transaction(reservePreTxHex)
+      const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
       const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
       poolBacktraceArgs.prevPoolTxHeader = prevPoolProof.txHeader
       poolBacktraceArgs.prevPoolTxOutputHashProof = prevPoolProof.hashProof

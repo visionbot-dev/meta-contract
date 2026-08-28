@@ -148,9 +148,9 @@ async function main() {
     debug: true,
   })
   const res = await mgr.swap({
-    prevPoolTxHex: state.issue.txHex,
+    currentPoolTxHex: state.issue.txHex,
     // 储备 FT 前序交易：第一代池 = 各 token 预锁交易（SDK 不做链上查询，显式传入）
-    reservePreTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },
+    prevPoolTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },
     // 用户预存到 UserSigLock 的 FT UTXO（方向/金额由 SDK 自动判断）
     userSigLockUtxo: userA,
     // UserSigLock 合约 UTXO（1 sat 控制合约）

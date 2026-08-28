@@ -113,14 +113,14 @@ const state = getPoolStateFromCreationTx(
 )
 const quote = getSwapQuote(state, AmmSwapDirection.A_TO_B, new BN('100000'))
 
-// 首次 swap（第一代池）：prevPoolTxHex = issue 交易（创建当前池）
-// reservePreTxHex = 储备 FT 前序交易（第一代池 = 各 token 预锁交易；非第一代 = 旧池创建交易）
+// 首次 swap（第一代池）：currentPoolTxHex = issue 交易（创建当前池）
+// prevPoolTxHex = 储备 FT 前序交易（第一代池 = 各 token 预锁交易；非第一代 = 旧池创建交易）
 // userSigLockUtxo = 预存到 UserSigLock 的 FT UTXO；SDK 自动判断方向、金额=FT 余额
 // utxos = SPACE 手续费/找零输入（显式传入）
-// 池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从 prevPoolTxHex 池脚本自动解析
+// 池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从 currentPoolTxHex 池脚本自动解析
 const swapped = await manager.swap({
-  prevPoolTxHex: issued.txHex,
-  reservePreTxHex: { A: preLockATxHex, B: preLockBTxHex, LP: preLockLpTxHex },
+  currentPoolTxHex: issued.txHex,
+  prevPoolTxHex: { A: preLockATxHex, B: preLockBTxHex, LP: preLockLpTxHex },
   userSigLockUtxo: { ... },                  // 预存 FT（tokenAddress = UserSigLock 地址）
   userSigLockContractUtxo: { ... },          // UserSigLock 合约 UTXO（1 sat）
   utxos: [ ... ],                            // SPACE 输入（显式；可带 wif，Metalet 模式可不带）
@@ -257,12 +257,12 @@ public async issuePool(params: IssuePoolParams): Promise<IssuePoolResult>
 public async swap(params: AmmSwapParams): Promise<AmmOpResult>
 ```
 
-SDK 自动从 `prevPoolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3），根据 `userSigLockUtxo` 自动判断方向，并自动计算 `amountOut/newReserveA/newReserveB/newLpReserve`。
+SDK 自动从 `currentPoolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3），根据 `userSigLockUtxo` 自动判断方向，并自动计算 `amountOut/newReserveA/newReserveB/newLpReserve`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `prevPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从输出 0 脚本自动解析 |
-| `reservePreTxHex` | **必填**；储备 FT 前序交易 hex（SDK 不做链上查询）：第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易，同时用于 Backtrace） |
+| `currentPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从输出 0 脚本自动解析 |
+| `prevPoolTxHex` | **必填**；储备 FT 前序交易 hex（SDK 不做链上查询）：第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易，同时用于 Backtrace） |
 | `userSigLockUtxo` | **必填**；用户预存到 UserSigLock 的 FT UTXO（tokenAddress = UserSigLock 合约地址）。SDK 根据该 FT 是 A/B 自动决定 swap 方向，金额 = 该 FT 余额 |
 | `userSigLockContractUtxo` | **必填**；UserSigLock 合约 UTXO（1 sat 控制合约，用户签名解锁）。若预存 FT 所在交易同时创建了合约输出，可省略 |
 | `utxos` | **必填**；SPACE 手续费/找零输入（显式传入；可带 wif，Metalet 模式可不带 wif） |
@@ -533,7 +533,7 @@ type Mcp02Options = {
 
 1. **SDK 严格不做链上查询**：所有交易 hex、UTXO、储备前序交易均由业务层显式传入（UTXO 带 `txHex`，FT 带 `preTxHex`），SDK 只做本地解析与交易组装。
 2. **UserSigLock 防截胡**：用户 FT/LP 必须先预存到 UserSigLock 合约地址，`userSigLockUtxo.tokenAddress` 必须等于该合约地址。预存与主交易分离时，即使预存成功而主交易失败，第三方也无法花走（需要用户签名）。
-3. **`prevPoolTxHex` / `reservePreTxHex`**：`prevPoolTxHex` 是创建当前池 UTXO 的交易（输出 0=池，1/2/3=储备）；`reservePreTxHex` 是储备 FT 前序交易（第一代池 `{A,B,LP}` 预锁交易；非第一代池单 string 旧池创建交易，同时用于 Backtrace）。两者均由业务层显式传入。
+3. **`currentPoolTxHex` / `prevPoolTxHex`**：`currentPoolTxHex` 是创建当前池 UTXO 的交易（输出 0=池，1/2/3=储备）；`prevPoolTxHex` 是储备 FT 前序交易（第一代池 `{A,B,LP}` 预锁交易；非第一代池单 string 旧池创建交易，同时用于 Backtrace）。两者均由业务层显式传入。
 4. **两笔交易广播顺序**：`swap/addLiquidity/removeLiquidity` 返回的 `unlockCheckTxHex`（amountCheck）必须先广播，再广播 `txHex`（主交易）。
 5. **新池脚本/地址**：`AmmOpResult` 已直接返回 `poolScript`/`poolAddress`（主交易输出 0），无需再从 `txHex` 解析。
 6. **签名姿势**：合约解锁时 `getPreimage` 使用 `subScript(0)`，`signTx` 使用**完整锁定脚本**；两者混用会导致 `OP_CHECKSIG`/`OP_CHECKSIGVERIFY` 失败。

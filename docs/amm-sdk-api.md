@@ -113,25 +113,21 @@ const state = getPoolStateFromCreationTx(
 )
 const quote = getSwapQuote(state, AmmSwapDirection.A_TO_B, new BN('100000'))
 
-// 首次 swap（第一代池）：poolTxHex = issue 交易；prevPoolTxHex = 各 token 预锁交易
-// userWif/userAddress 可省略：Metalet signer 模式下 SDK 自动从 signer 获取地址并签名 UserSigLock
+// 首次 swap（第一代池）：prevPoolTxHex = issue 交易（创建当前池）
+// userSigLockUtxo = 预存到 UserSigLock 的 FT UTXO；SDK 自动判断方向、金额=FT 余额
+// userWif/userAddress 可省略：Metalet signer 模式下 SDK 自动从 signer 获取地址并签名
 const swapped = await manager.swap({
   params,
-  poolTxHex: issued.txHex,
-  prevPoolTxHex: {
-    A: preLockATxHex,
-    B: preLockBTxHex,
-    LP: preLockLpTxHex,
-  },
-  direction: AmmSwapDirection.A_TO_B,
-  userUtxo: { ... },         // tokenAddress = UserSigLock 合约地址
-  userSigLockUtxo: { ... },
-  amountIn: new BN('100000'),
-  utxos: [ ... ],            // 可带 wif；Metalet 模式可不带 wif，由 signer 签名
+  prevPoolTxHex: issued.txHex,
+  userSigLockUtxo: { ... },                  // 预存 FT（tokenAddress = UserSigLock 地址）
+  userSigLockContractUtxo: { ... },          // UserSigLock 合约 UTXO（1 sat）
+  userWif: '...',                            // 可选
+  userAddress: '用户地址',                   // 可选
 })
 ```
 
-> ⚠️ SDK **不做链上查询**：所有 UTXO（含 `txHex`/`preTxHex`）必须由业务层通过索引器/RPC 获取后传入。
+> ⚠️ SDK 默认不做链上查询。若希望 swap 只传最小参数，可在构造时注入
+> `fetchTxHex`/`fetchUtxosByAddress`（业务层索引器封装），SDK 会自动补齐储备前序交易与 SPACE 输入。
 
 ---
 
@@ -148,6 +144,8 @@ new FtAmmPoolManager(opts: Mcp02Options)
 | `network` | `API_NET` | 否 | 默认 `MAIN`；测试网传 `API_NET.TESTNET` |
 | `purse` | `string` | 否 | SPACE 手续费/找零私钥 WIF（交易未显式传 `feeWif` 时使用） |
 | `signer` | `ISigner` | 否 | Metalet 等外部签名器；传入后 P2PKH/UserSigLock 均可用 signer 签名，业务层无需传 wif |
+| `fetchTxHex` | `(txid) => Promise<string>` | 否 | 按 txid 获取交易 raw hex；注入后 swap 自动补齐储备 FT 前序交易/Backtrace 旧池交易 |
+| `fetchUtxosByAddress` | `(address) => Promise<any[]>` | 否 | 按地址获取 UTXO；注入后 swap 自动补齐 SPACE 输入 |
 | `feeb` | `number` | 否 | 费率 sat/byte，默认 `FEEB` |
 | `debug` | `boolean` | 否 | `true` 时对池/Token/amountCheck/UserSigLock 做本地 scrypt 验证，失败立即抛错 |
 
@@ -259,19 +257,16 @@ public async issuePool(params: IssuePoolParams): Promise<IssuePoolResult>
 public async swap(params: AmmSwapParams): Promise<AmmOpResult>
 ```
 
-SDK 自动从 `poolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3），并自动计算 `amountOut/newReserveA/newReserveB/newLpReserve`。
+SDK 自动从 `prevPoolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3），根据 `userSigLockUtxo` 自动判断方向，并自动计算 `amountOut/newReserveA/newReserveB/newLpReserve`。
 
 | 字段 | 说明 |
 | --- | --- |
 | `params` | 池参数（与 issue 相同） |
-| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） |
-| `prevPoolTxHex` | 储备 FT 前序交易 hex：第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易，同时用于 Backtrace） |
-| `direction` | `AmmSwapDirection.A_TO_B` 或 `B_TO_A` |
-| `userUtxo` | 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），**tokenAddress 必须 = UserSigLock 合约地址** |
-| `userSigLockUtxo` | UserSigLock 合约 UTXO（预存 FT 的控制合约，用户签名解锁） |
+| `prevPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） |
+| `userSigLockUtxo` | **必填**；用户预存到 UserSigLock 的 FT UTXO（tokenAddress = UserSigLock 合约地址）。SDK 根据该 FT 是 A/B 自动决定 swap 方向，金额 = 该 FT 余额 |
+| `userSigLockContractUtxo` | **必填**；UserSigLock 合约 UTXO（1 sat 控制合约，用户签名解锁）。若预存 FT 所在交易同时创建了合约输出，可省略 |
 | `userWif` | **可选**；用户私钥 WIF（解锁 UserSigLock）。不传时使用 Metalet signer |
 | `userAddress` | **可选**；用户收款地址。不传时使用 signer/purse 地址 |
-| `amountIn` | 输入金额（SDK 自动计算输出） |
 
 返回 `AmmOpResult`：
 
@@ -535,9 +530,9 @@ type Mcp02Options = {
 
 ## 注意事项与常见错误
 
-1. **SDK 不做链上查询**：所有 UTXO 必须带 `txHex`（FT 还需 `preTxHex`），由业务层从索引器/RPC 获取。池/储备相关交易只需传 `poolTxHex`/`prevPoolTxHex`，SDK 自动解析。
-2. **UserSigLock 防截胡**：用户 FT/LP 必须先预存到 UserSigLock 合约地址，`userUtxo.tokenAddress` 必须等于该合约地址。预存与主交易分离时，即使预存成功而主交易失败，第三方也无法花走（需要用户签名）。
-3. **`prevPoolTxHex`**：储备 FT 前序交易 hex。第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易），缺失会导致储备 FT 预处理失败或 Backtrace 链上 `OP_EQUALVERIFY` 失败。
+1. **SDK 默认不做链上查询**：业务层 UTXO 必须带 `txHex`（FT 还需 `preTxHex`）。构造时注入 `fetchTxHex`/`fetchUtxosByAddress` 后，swap 可只传最小参数，SDK 自动补齐储备前序交易与 SPACE 输入。
+2. **UserSigLock 防截胡**：用户 FT/LP 必须先预存到 UserSigLock 合约地址，`userSigLockUtxo.tokenAddress` 必须等于该合约地址。预存与主交易分离时，即使预存成功而主交易失败，第三方也无法花走（需要用户签名）。
+3. **`prevPoolTxHex`**：创建当前池 UTXO 的交易 hex（输出 0=池，1/2/3=储备）。SDK 自动解析池/储备；储备 FT 前序交易与 Backtrace 旧池交易通过构造注入的 `fetchTxHex` 自动获取，未注入时需业务层自行传入。
 4. **两笔交易广播顺序**：`swap/addLiquidity/removeLiquidity` 返回的 `unlockCheckTxHex`（amountCheck）必须先广播，再广播 `txHex`（主交易）。
 5. **新池脚本/地址**：`AmmOpResult` 已直接返回 `poolScript`/`poolAddress`（主交易输出 0），无需再从 `txHex` 解析。
 6. **签名姿势**：合约解锁时 `getPreimage` 使用 `subScript(0)`，`signTx` 使用**完整锁定脚本**；两者混用会导致 `OP_CHECKSIG`/`OP_CHECKSIGVERIFY` 失败。

@@ -70,28 +70,29 @@ export type IssuePoolResult = {
 }
 
 export type AmmSwapParams = {
+  /** 池静态参数（token codehash/ID、LP 总量、费率等；无法从链上脚本反序列化，需传入） */
   params: AmmPoolParams
-  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
-  poolTxHex: string
   /**
-   * 储备 FT 前序交易 hex：
-   * - 第一代池（issue 后）：各 token 预锁交易 hex（可传 { A, B, LP }）
-   * - 非第一代池：旧池创建交易 hex（单 string，同时用于 Backtrace 证明）
+   * 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。
+   * SDK 自动从该交易解析池/储备，并复制旧脚本修改 data part 构造新输出。
    */
-  prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
-  direction: AmmSwapDirection
-  /** 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），tokenAddress = UserSigLock 合约地址 */
-  userUtxo: ParamFtUtxo
-  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
-  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+  prevPoolTxHex: string
+  /**
+   * 用户预存到 UserSigLock 的 FT UTXO（tokenAddress = UserSigLock 合约地址）。
+   * SDK 根据该 FT 是 A 还是 B 自动判断 swap 方向，金额 = 该 FT 余额（全部投入）。
+   * 若该 FT 所在交易同时创建了 UserSigLock 合约输出，SDK 会自动找到合约 UTXO。
+   */
+  userSigLockUtxo: ParamFtUtxo
+  /**
+   * UserSigLock 合约 UTXO（可选）。
+   * 不传时 SDK 尝试从 userSigLockUtxo.txHex 输出中自动查找；
+   * 若预存交易未包含合约输出，则需要显式传入。
+   */
+  userSigLockContractUtxo?: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
   userWif?: string
   /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
   userAddress?: string | mvc.Address
-  amountIn: BN
-  utxos?: any[]
-  changeAddress?: string | mvc.Address
-  feeWif?: string
 }
 
 export type AmmOpResult = {
@@ -145,16 +146,28 @@ export type AmmRemoveLiquidityParams = {
   feeWif?: string
 }
 
+/** FtAmmPoolManager 构造选项：在 Mcp02Options 基础上支持内部自动补齐链上数据 */
+export type AmmManagerOptions = Mcp02Options & {
+  /** 按 txid 获取交易 raw hex（SDK 自动补齐 Backtrace 旧池交易/储备 FT 前序交易时使用） */
+  fetchTxHex?: (txid: string) => Promise<string>
+  /** 按地址获取未花费 UTXO（SDK 自动补齐 UserSigLock 合约 UTXO/SPACE 输入时使用） */
+  fetchUtxosByAddress?: (address: string) => Promise<any[]>
+}
+
 /**
  * FtAmmPoolManager：AMM 池交易组装。
  *
  * 继承 FtManager 复用 FT 预处理/解锁基础设施。
- * ⚠️ 本 SDK 不做链上查询：所有 utxo 必须由外部业务层传入（含 txHex/preTxHex）。
+ * ⚠️ 默认不做链上查询；如需 swap 等接口只传最小参数，请在构造时注入
+ * `fetchTxHex` / `fetchUtxosByAddress`，SDK 会自行补齐旧池交易、储备前序交易、
+ * UserSigLock 合约 UTXO、SPACE 输入等。
  */
 export class FtAmmPoolManager extends FtManager {
   private _pursePrivateKey?: mvc.PrivateKey
+  private _fetchTxHex?: (txid: string) => Promise<string>
+  private _fetchUtxosByAddress?: (address: string) => Promise<any[]>
 
-  constructor(opts: Mcp02Options) {
+  constructor(opts: AmmManagerOptions) {
     super({
       network: API_NET.MAIN,
       feeb: FEEB,
@@ -163,6 +176,8 @@ export class FtAmmPoolManager extends FtManager {
     if (opts.purse) {
       this._pursePrivateKey = mvc.PrivateKey.fromWIF(opts.purse)
     }
+    this._fetchTxHex = opts.fetchTxHex
+    this._fetchUtxosByAddress = opts.fetchUtxosByAddress
   }
 
   /**
@@ -735,6 +750,77 @@ export class FtAmmPoolManager extends FtManager {
     return { ftA: preA.ft, ftB: preB.ft, ftLp: preLp.ft }
   }
 
+  /** 获取交易 raw hex（优先构造注入的 fetchTxHex；未注入则报错） */
+  private async _autoFetchTxHex(txid: string): Promise<string> {
+    if (!this._fetchTxHex) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        `AMM: need tx ${txid} raw hex to build proofs. Pass fetchTxHex in FtAmmPoolManager options to let SDK resolve it automatically.`
+      )
+    }
+    return this._fetchTxHex(txid)
+  }
+
+  /** 获取地址 UTXO（优先构造注入的 fetchUtxosByAddress；未注入则报错） */
+  private async _autoFetchUtxos(address: string): Promise<any[]> {
+    if (!this._fetchUtxosByAddress) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        `AMM: need utxos of ${address} to build tx. Pass fetchUtxosByAddress in FtAmmPoolManager options to let SDK resolve it automatically.`
+      )
+    }
+    return this._fetchUtxosByAddress(address)
+  }
+
+  /** 从池创建交易自动解析储备：preTxHex 由该交易输入 1/2/3 的 prevTxId 自动获取 */
+  private async _resolveReservesAuto(poolTxHex: string): Promise<{ ftA: any; ftB: any; ftLp: any }> {
+    const poolTx = new mvc.Transaction(poolTxHex)
+    const make = async (outputIndex: number) => {
+      const prevTxId = poolTx.inputs[outputIndex].prevTxId.toString('hex')
+      const preTxHex = await this._autoFetchTxHex(prevTxId)
+      return this._pretreatAndPerfect(this._makeReserveUtxo(poolTxHex, outputIndex, preTxHex))
+    }
+    const [preA, preB, preLp] = await Promise.all([make(1), make(2), make(3)])
+    return { ftA: preA.ft, ftB: preB.ft, ftLp: preLp.ft }
+  }
+
+  /**
+   * 从预存 FT UTXO 自动找到 UserSigLock 合约 UTXO。
+   *
+   * 要求预存交易（userSigLockFtUtxo.txHex）在同一笔交易中同时创建：
+   *   - UserSigLock 合约输出（1 sat，锁定脚本 hash160 == tokenAddress）
+   *   - 预存 FT 输出
+   * SDK 直接从 txHex 输出中扫描，无需链上查询。
+   */
+  private _autoFindUserSigLockContractUtxo(
+    userSigLockFtUtxo: ParamFtUtxo
+  ): { txId: string; outputIndex: number; satoshis: number; txHex: string } {
+    const tx = new mvc.Transaction(userSigLockFtUtxo.txHex)
+    const ftScriptBuf = tx.outputs[userSigLockFtUtxo.outputIndex].script.toBuffer()
+    const tokenAddressHash = String(ftProto.parseDataPart(ftScriptBuf).tokenAddress)
+    for (let i = 0; i < tx.outputs.length; i++) {
+      const scriptBuf = tx.outputs[i].script.toBuffer()
+      if (mvc.crypto.Hash.sha256ripemd160(scriptBuf).toString('hex') === tokenAddressHash) {
+        return {
+          txId: userSigLockFtUtxo.txId,
+          outputIndex: i,
+          satoshis: tx.outputs[i].satoshis,
+          txHex: userSigLockFtUtxo.txHex,
+        }
+      }
+    }
+    throw new CodeError(
+      ErrCode.EC_INVALID_ARGUMENT,
+      'AMM: userSigLockFtUtxo.txHex does not contain the UserSigLock contract utxo. Use preLockToUserSigLock() to create both in one tx.'
+    )
+  }
+
+  /** 自动获取 SPACE 手续费输入（不含 wif；signer/purse 模式可用） */
+  private async _autoFetchSpaceUtxos(address: string): Promise<any[]> {
+    const utxos = await this._autoFetchUtxos(address)
+    return utxos.filter((u) => (u.satoshis ?? u.satoshi ?? u.value ?? 0) > 1000)
+  }
+
   /** 解析用户地址与公钥哈希（支持 WIF 或 Metalet signer） */
   private async _getUserAddressAndPubKey(
     userAddress?: string | mvc.Address,
@@ -828,36 +914,50 @@ export class FtAmmPoolManager extends FtManager {
   public async swap(params: AmmSwapParams): Promise<AmmOpResult> {
     const {
       params: poolParams,
-      poolTxHex,
       prevPoolTxHex,
-      direction,
-      userUtxo,
-      userSigLockUtxo,
+      userSigLockUtxo: userSigLockFtUtxo,
+      userSigLockContractUtxo,
       userWif,
       userAddress,
-      amountIn,
-      utxos,
-      changeAddress,
-      feeWif,
     } = params
-    const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
     const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
-    const aToB = direction === AmmSwapDirection.A_TO_B
+    const changeAddr = mvc.Address.fromPublicKeyHash(userAddrBuf, this.network)
+    const feeWif = undefined
 
-    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
-    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
-    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
-    const ftU = (await this._pretreatAndPerfect(userUtxo)).ft
+    // SDK 自动补齐 SPACE 输入
+    const spaceUtxos = await this._autoFetchSpaceUtxos(changeAddr.toString())
+    const utxoInfo = prepareUtxos(spaceUtxos)
+
+    // 从 prevPoolTxHex（创建当前池 UTXO 的交易）自动解析池与储备
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(prevPoolTxHex)
+    const { ftA, ftB, ftLp } = await this._resolveReservesAuto(prevPoolTxHex)
+    const ftU = (await this._pretreatAndPerfect(userSigLockFtUtxo)).ft
+    const userUtxo = userSigLockFtUtxo
+
+    // 方向：预存 FT 是 A → A_TO_B；是 B → B_TO_A；金额 = 预存 FT 全部余额
+    const ftUTokenID = toHex(ftProto.getTokenID(ftU.lockingScript.toBuffer()))
+    let aToB: boolean
+    if (ftUTokenID === poolParams.tokenAID) {
+      aToB = true
+    } else if (ftUTokenID === poolParams.tokenBID) {
+      aToB = false
+    } else {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM swap: userSigLockUtxo is neither tokenA nor tokenB.')
+    }
+    const amountIn = ftU.tokenAmount
     const quote = getSwapQuote(
       { reserveA: ftA.tokenAmount, reserveB: ftB.tokenAmount, feeBps: poolParams.feeBps },
-      direction,
+      aToB ? AmmSwapDirection.A_TO_B : AmmSwapDirection.B_TO_A,
       amountIn
     )
     const amountOut = quote.amountOut
     const newReserveA = quote.reserveA
     const newReserveB = quote.reserveB
     const newLpReserve = ftLp.tokenAmount
+
+    // UserSigLock 合约 UTXO：优先显式传入，否则从预存 FT 所在交易输出中自动查找
+    const userSigLockUtxo =
+      userSigLockContractUtxo || this._autoFindUserSigLockContractUtxo(userSigLockFtUtxo)
 
     // 输出脚本（satoshis 统一 1）
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)

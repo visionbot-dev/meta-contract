@@ -141,21 +141,24 @@ async function main() {
     minReserve: new BN(state.params.minReserve, 16),
   }
 
-  const mgr = new FtAmmPoolManager({ network: NETWORK, purse: WIF, feeb: 0.5, debug: true })
+  const mgr = new FtAmmPoolManager({
+    network: NETWORK,
+    purse: WIF,
+    feeb: 0.5,
+    debug: true,
+    // SDK 内部自动补齐储备 FT 前序交易 / SPACE 输入
+    fetchTxHex: async (txid) => getRawTx(txid),
+    fetchUtxosByAddress: async (addr) => getUnspentUtxos(addr),
+  })
   const res = await mgr.swap({
     params,
-    poolTxHex: state.issue.txHex,
-    // 第一代池：储备 A/B/LP 来自各自的预锁交易
-    prevPoolTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },
-    direction: 1,
-    userUtxo: userA,
-    userSigLockUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
+    prevPoolTxHex: state.issue.txHex,
+    // 用户预存到 UserSigLock 的 FT UTXO（方向/金额由 SDK 自动判断）
+    userSigLockUtxo: userA,
+    // UserSigLock 合约 UTXO（1 sat 控制合约）
+    userSigLockContractUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
     userWif: WIF,
     userAddress: A1,
-    amountIn,
-    utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: WIF })),
-    changeAddress: A1,
-    feeWif: WIF,
   })
   console.log('swap unlockCheck txid:', res.unlockCheckTxid)
   console.log('swap main txid:', res.txid)

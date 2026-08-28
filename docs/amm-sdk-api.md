@@ -13,6 +13,7 @@
 4. [生命周期方法](#生命周期方法)
    - [`deployGenesis`](#deploygenesis)
    - [`preLockReserve`](#prelockreserve)
+   - [`createUserSigLock`](#createusersiglock)
    - [`issuePool`](#issuepool)
    - [`swap`](#swap)
    - [`addLiquidity`](#addliquidity)
@@ -113,6 +114,7 @@ const state = getPoolStateFromCreationTx(
 const quote = getSwapQuote(state, AmmSwapDirection.A_TO_B, new BN('100000'))
 
 // 首次 swap（第一代池）：poolTxHex = issue 交易；prevPoolTxHex = 各 token 预锁交易
+// userWif/userAddress 可省略：Metalet signer 模式下 SDK 自动从 signer 获取地址并签名 UserSigLock
 const swapped = await manager.swap({
   params,
   poolTxHex: issued.txHex,
@@ -124,10 +126,8 @@ const swapped = await manager.swap({
   direction: AmmSwapDirection.A_TO_B,
   userUtxo: { ... },         // tokenAddress = UserSigLock 合约地址
   userSigLockUtxo: { ... },
-  userWif: '...',
-  userAddress: '用户地址',
   amountIn: new BN('100000'),
-  utxos: [ ... ],
+  utxos: [ ... ],            // 可带 wif；Metalet 模式可不带 wif，由 signer 签名
 })
 ```
 
@@ -147,7 +147,7 @@ new FtAmmPoolManager(opts: Mcp02Options)
 | --- | --- | --- | --- |
 | `network` | `API_NET` | 否 | 默认 `MAIN`；测试网传 `API_NET.TESTNET` |
 | `purse` | `string` | 否 | SPACE 手续费/找零私钥 WIF（交易未显式传 `feeWif` 时使用） |
-| `signer` | `ISigner` | 否 | Metalet 等外部签名器（预留） |
+| `signer` | `ISigner` | 否 | Metalet 等外部签名器；传入后 P2PKH/UserSigLock 均可用 signer 签名，业务层无需传 wif |
 | `feeb` | `number` | 否 | 费率 sat/byte，默认 `FEEB` |
 | `debug` | `boolean` | 否 | `true` 时对池/Token/amountCheck/UserSigLock 做本地 scrypt 验证，失败立即抛错 |
 
@@ -204,6 +204,27 @@ public async preLockReserve(params: {
 
 ---
 
+### `createUserSigLock`
+
+创建用户预存锁 UTXO（防截胡）。返回的 `addressStr` 即预存 FT 的目标地址（`tokenAddress`）。
+
+```ts
+public async createUserSigLock(params: {
+  userWif?: string        // 可选；不传则用 Metalet signer / purse
+  utxos?: any[]          // SPACE 输入（可带 wif；signer 模式可不带）
+  changeAddress?: string | mvc.Address
+}): Promise<{
+  txId: string
+  outputIndex: number
+  satoshis: number
+  txHex: string
+  addressHash: string
+  addressStr: string
+}>
+```
+
+---
+
 ### `issuePool`
 
 Tx1：PoolGenesis issue → 正式池 + 储备 + 创建者 LP。
@@ -248,8 +269,8 @@ SDK 自动从 `poolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3�
 | `direction` | `AmmSwapDirection.A_TO_B` 或 `B_TO_A` |
 | `userUtxo` | 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | UserSigLock 合约 UTXO（预存 FT 的控制合约，用户签名解锁） |
-| `userWif` | 用户私钥 WIF（解锁 UserSigLock） |
-| `userAddress` | 用户收款地址（输出发往此地址） |
+| `userWif` | **可选**；用户私钥 WIF（解锁 UserSigLock）。不传时使用 Metalet signer |
+| `userAddress` | **可选**；用户收款地址。不传时使用 signer/purse 地址 |
 | `amountIn` | 输入金额（SDK 自动计算输出） |
 
 返回 `AmmOpResult`：
@@ -276,8 +297,8 @@ public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult>
 | `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
 | `userAUtxo/userBUtxo` | 用户注入的 FT-A/FT-B，**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | 用户预存锁 UTXO |
-| `userWif` | 用户私钥 WIF |
-| `userAddress` | 用户收款地址 |
+| `userWif` | **可选**；不传时使用 Metalet signer |
+| `userAddress` | **可选**；不传时使用 signer/purse 地址 |
 | `amountAIn/amountBIn` | 注入金额（SDK 自动计算 LP 铸造量） |
 
 ---
@@ -296,8 +317,8 @@ public async removeLiquidity(params: AmmRemoveLiquidityParams): Promise<AmmOpRes
 | `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
 | `userLpUtxo` | 用户持有的 LP，**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | 用户预存锁 UTXO |
-| `userWif` | 用户私钥 WIF |
-| `userAddress` | 用户收款地址 |
+| `userWif` | **可选**；不传时使用 Metalet signer |
+| `userAddress` | **可选**；不传时使用 signer/purse 地址 |
 | `lpReturn` | 赎回的 LP 数量（SDK 自动计算赎回金额） |
 
 ---
@@ -522,3 +543,4 @@ type Mcp02Options = {
 6. **签名姿势**：合约解锁时 `getPreimage` 使用 `subScript(0)`，`signTx` 使用**完整锁定脚本**；两者混用会导致 `OP_CHECKSIG`/`OP_CHECKSIGVERIFY` 失败。
 7. **调试**：`debug: true` 时 SDK 会对每个合约输入做本地 scrypt 验证，链上失败前先本地暴露错误。
 8. **金额单位**：AMM 公式中 LP 为整数份额，所有除法向下取整；`swap/addLiquidity/removeLiquidity` 内部自动计算报价，业务层也可调用报价函数预览。
+9. **Metalet 支持**：构造时传 `signer`（如 `new MetaletSigner(window.metaidwallet)`）后，所有 P2PKH 输入（SPACE fee、UserSigLock 创建）和 UserSigLock 解锁均自动走 signer 签名；`userWif`/`userAddress`/`feeWif` 均可省略。仍可传 WIF 走本地签名。

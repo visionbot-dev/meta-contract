@@ -264,7 +264,7 @@ export class FtManager {
   transferCheckCodeHashArray: Bytes[]
   unlockContractCodeHashArray: Bytes[]
   protected debug: boolean
-  private signer?: ISigner
+  protected signer?: ISigner
 
   constructor({
     network = API_NET.MAIN,

@@ -16,7 +16,7 @@ import { TOKEN_UNLOCK_TYPE, TokenUnlockContractCheckFactory } from '../mcp02/con
 import { FtManager, Mcp02Options, ParamFtUtxo } from '../mcp02'
 import { FtAmmPoolFactory, FT_AMM_POOL_OP } from './contract-factory/ftAmmPool'
 import { FtAmmPoolGenesisFactory } from './contract-factory/ftAmmPoolGenesis'
-import { UserSigLockFactory } from './contract-factory/userSigLock'
+import { UserSigLock, UserSigLockFactory } from './contract-factory/userSigLock'
 import { buildPoolLockingScript, AmmPoolParams, AmmPoolData } from './builder'
 import { getAddLiquidityQuote, getCreatePoolQuote, getRemoveLiquidityQuote, getSwapQuote } from './math'
 import { AmmSwapDirection } from './types'
@@ -84,8 +84,10 @@ export type AmmSwapParams = {
   userUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
   userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
-  userWif: string
-  userAddress: string | mvc.Address
+  /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
+  userWif?: string
+  /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
+  userAddress?: string | mvc.Address
   amountIn: BN
   utxos?: any[]
   changeAddress?: string | mvc.Address
@@ -113,8 +115,10 @@ export type AmmAddLiquidityParams = {
   userBUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
   userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
-  userWif: string
-  userAddress: string | mvc.Address
+  /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
+  userWif?: string
+  /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
+  userAddress?: string | mvc.Address
   amountAIn: BN
   amountBIn: BN
   utxos?: any[]
@@ -131,8 +135,10 @@ export type AmmRemoveLiquidityParams = {
   userLpUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
   userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
-  userWif: string
-  userAddress: string | mvc.Address
+  /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
+  userWif?: string
+  /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
+  userAddress?: string | mvc.Address
   lpReturn: BN
   utxos?: any[]
   changeAddress?: string | mvc.Address
@@ -255,6 +261,45 @@ export class FtAmmPoolManager extends FtManager {
   }
 
   /**
+   * 创建 UserSigLock UTXO（用户预存锁，防截胡）。
+   *
+   * 支持：
+   * - `userWif` 本地私钥签名
+   * - 构造时传入 `signer`（Metalet）签名
+   * - `purse` 作为默认用户
+   *
+   * 返回的 `addressStr` 即预存 FT 的接收地址（tokenAddress 目标）。
+   */
+  public async createUserSigLock(params: {
+    userWif?: string
+    utxos?: any[]
+    changeAddress?: string | mvc.Address
+  }): Promise<{ txId: string; outputIndex: number; satoshis: number; txHex: string; addressHash: string; addressStr: string }> {
+    const { userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(undefined, params.userWif)
+    const contract = UserSigLockFactory.createContract({ pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')) })
+    const script = contract.lockingScript
+    const addressHash = mvc.crypto.Hash.sha256ripemd160(script.toBuffer()).toString('hex')
+    const addressStr = mvc.Address.fromPublicKeyHash(Buffer.from(addressHash, 'hex'), this.network).toString()
+
+    const utxoInfo = prepareUtxos(params.utxos)
+    const changeAddr = params.changeAddress ? new mvc.Address(params.changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
+    const txComposer = new TxComposer()
+    const p2pkhInputIndexes = addP2PKHInputs(txComposer, utxoInfo.utxos)
+    txComposer.appendOutput({ lockingScript: script, satoshis: 1 })
+    addChangeOutput(txComposer, changeAddr, this.feeb)
+    if (userPrivKey) {
+      unlockP2PKHInputs(txComposer, p2pkhInputIndexes, p2pkhInputIndexes.map(() => userPrivKey))
+    } else {
+      await this._unlockP2PKHInputs(txComposer, p2pkhInputIndexes, [])
+    }
+    checkFeeRate(txComposer, this.feeb)
+
+    const txId = txComposer.getTxId()
+    const txHex = txComposer.getRawHex()
+    return { txId, outputIndex: 0, satoshis: 1, txHex, addressHash, addressStr }
+  }
+
+  /**
    * Tx1：PoolGenesis issue → 正式池 + 储备 + 创建者 LP。
    *
    * 交易布局：
@@ -279,7 +324,7 @@ export class FtAmmPoolManager extends FtManager {
     const genesisTx = new mvc.Transaction(genesisUtxo.txHex)
     const genesisScript = genesisTx.outputs[genesisUtxo.outputIndex].script.toBuffer()
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
+    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
     const userAddrBuf =
       typeof userAddress === 'string'
         ? new mvc.Address(userAddress, this.network).hashBuffer
@@ -690,6 +735,88 @@ export class FtAmmPoolManager extends FtManager {
     return { ftA: preA.ft, ftB: preB.ft, ftLp: preLp.ft }
   }
 
+  /** 解析用户地址与公钥哈希（支持 WIF 或 Metalet signer） */
+  private async _getUserAddressAndPubKey(
+    userAddress?: string | mvc.Address,
+    userWif?: string
+  ): Promise<{ userAddrBuf: Buffer; userPubKeyHash: Buffer; userPrivKey?: mvc.PrivateKey }> {
+    const priv = userWif ? mvc.PrivateKey.fromWIF(userWif) : undefined
+    if (userAddress) {
+      const userAddrBuf =
+        typeof userAddress === 'string'
+          ? new mvc.Address(userAddress, this.network).hashBuffer
+          : userAddress instanceof mvc.Address
+          ? userAddress.hashBuffer
+          : userAddress
+      const pubBuf = priv ? priv.publicKey.toBuffer() : this.signer ? Buffer.from(await this.signer.getPublicKey(), 'hex') : undefined
+      if (!pubBuf) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: userAddress provided but no userWif/signer public key to build UserSigLock.')
+      }
+      return { userAddrBuf, userPubKeyHash: mvc.crypto.Hash.sha256ripemd160(pubBuf), userPrivKey: priv }
+    }
+    if (this.signer) {
+      const addrStr = await this.signer.getAddress(this.network)
+      const pubHex = await this.signer.getPublicKey()
+      return {
+        userAddrBuf: new mvc.Address(addrStr, this.network).hashBuffer,
+        userPubKeyHash: mvc.crypto.Hash.sha256ripemd160(Buffer.from(pubHex, 'hex')),
+        userPrivKey: priv,
+      }
+    }
+    if (this._pursePrivateKey) {
+      return {
+        userAddrBuf: this._pursePrivateKey.toAddress(this.network).hashBuffer,
+        userPubKeyHash: mvc.crypto.Hash.sha256ripemd160(this._pursePrivateKey.publicKey.toBuffer()),
+        userPrivKey: priv || this._pursePrivateKey,
+      }
+    }
+    throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: userAddress/userWif or signer is required.')
+  }
+
+  /** 签名 UserSigLock 输入（支持 WIF 或 Metalet signer） */
+  private async _signUserSigLock(
+    txComposer: TxComposer,
+    userPrivKey: mvc.PrivateKey | undefined,
+    userSigLockInputIndex: number,
+    userSigLockUtxo: { satoshis: number },
+    userSigLockContract: UserSigLock
+  ): Promise<{ pubKeyHex: string; sigHex: string }> {
+    if (userPrivKey) {
+      return {
+        pubKeyHex: toHex(userPrivKey.publicKey.toBuffer()),
+        sigHex: toHex(
+          signTx(
+            txComposer.getTx(),
+            userPrivKey,
+            userSigLockContract.lockingScript,
+            userSigLockUtxo.satoshis,
+            userSigLockInputIndex,
+            sighashType
+          )
+        ),
+      }
+    }
+    if (this.signer) {
+      const sr = await this.signer.signInput(txComposer, userSigLockInputIndex)
+      return { pubKeyHex: sr.pubKeyHex, sigHex: sr.sig }
+    }
+    throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: UserSigLock needs userWif or signer.')
+  }
+
+  /** 解锁 SPACE fee 输入（支持 WIF/purse 或 Metalet signer） */
+  private async _unlockFee(txComposer: TxComposer, feeInputIndex: number, feeWif?: string): Promise<void> {
+    const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
+    if (feeKey) {
+      unlockP2PKHInputs(txComposer, [feeInputIndex], [feeKey])
+      return
+    }
+    if (this.signer) {
+      await this._unlockP2PKHInputs(txComposer, [feeInputIndex], [])
+      return
+    }
+    throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: fee input needs feeWif, purse WIF, or signer.')
+  }
+
   /**
    * SWAP：A→B / B→A 主交易组装。
    *
@@ -714,13 +841,8 @@ export class FtAmmPoolManager extends FtManager {
       feeWif,
     } = params
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
-    const userAddrBuf =
-      typeof userAddress === 'string'
-        ? new mvc.Address(userAddress, this.network).hashBuffer
-        : userAddress instanceof mvc.Address
-        ? userAddress.hashBuffer
-        : userAddress
+    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
+    const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
     const aToB = direction === AmmSwapDirection.A_TO_B
 
     // 从 poolTxHex 自动解析池与储备，SDK 计算报价
@@ -907,10 +1029,8 @@ export class FtAmmPoolManager extends FtManager {
     }
 
     // 两轮签名
-    const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
     // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
-    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
     const userSigLockContract = UserSigLockFactory.createContract({
       pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
     })
@@ -1098,14 +1218,21 @@ export class FtAmmPoolManager extends FtManager {
 
       // 3.5) 解锁 UserSigLock（用户签名，授权预存 FT）
       {
+        const { pubKeyHex, sigHex } = await this._signUserSigLock(
+          txComposer,
+          userPrivKey,
+          userSigLockInputIndex,
+          userSigLockUtxo,
+          userSigLockContract
+        )
         const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
         const uslPreimage = new SigHashPreimage(
           toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
         )
         const uslCall = userSigLockContract.unlock({
           txPreimage: uslPreimage,
-          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
-          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+          senderPubKey: new PubKey(pubKeyHex),
+          senderSig: new Sig(sigHex),
         })
         if (this.debug) {
           const ret = uslCall.verify({
@@ -1119,11 +1246,7 @@ export class FtAmmPoolManager extends FtManager {
       }
 
       // 4) SPACE fee
-      const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
-      if (!feeKey) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM swap: fee input needs feeWif or purse WIF.')
-      }
-      unlockP2PKHInputs(txComposer, [feeInputIndex], [feeKey])
+      await this._unlockFee(txComposer, feeInputIndex, feeWif)
     }
     checkFeeRate(txComposer, this.feeb)
 
@@ -1155,13 +1278,8 @@ export class FtAmmPoolManager extends FtManager {
       feeWif,
     } = params
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
-    const userAddrBuf =
-      typeof userAddress === 'string'
-        ? new mvc.Address(userAddress, this.network).hashBuffer
-        : userAddress instanceof mvc.Address
-        ? userAddress.hashBuffer
-        : userAddress
+    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
+    const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
 
     // 从 poolTxHex 自动解析池与储备，SDK 计算报价
     const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
@@ -1327,10 +1445,8 @@ export class FtAmmPoolManager extends FtManager {
       poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = prevPoolProof.satoshiBytes
     }
 
-    const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
     // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
-    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
     const userSigLockContract = UserSigLockFactory.createContract({
       pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
     })
@@ -1497,14 +1613,21 @@ export class FtAmmPoolManager extends FtManager {
 
       // 解锁 UserSigLock（用户签名，授权预存 FT）
       {
+        const { pubKeyHex, sigHex } = await this._signUserSigLock(
+          txComposer,
+          userPrivKey,
+          userSigLockInputIndex,
+          userSigLockUtxo,
+          userSigLockContract
+        )
         const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
         const uslPreimage = new SigHashPreimage(
           toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
         )
         const uslCall = userSigLockContract.unlock({
           txPreimage: uslPreimage,
-          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
-          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+          senderPubKey: new PubKey(pubKeyHex),
+          senderSig: new Sig(sigHex),
         })
         if (this.debug) {
           const ret = uslCall.verify({
@@ -1517,11 +1640,7 @@ export class FtAmmPoolManager extends FtManager {
         txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
       }
 
-      const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
-      if (!feeKey) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM addLiquidity: fee input needs feeWif or purse WIF.')
-      }
-      unlockP2PKHInputs(txComposer, [feeInputIndex], [feeKey])
+      await this._unlockFee(txComposer, feeInputIndex, feeWif)
     }
     checkFeeRate(txComposer, this.feeb)
 
@@ -1551,13 +1670,8 @@ export class FtAmmPoolManager extends FtManager {
       feeWif,
     } = params
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
-    const userAddrBuf =
-      typeof userAddress === 'string'
-        ? new mvc.Address(userAddress, this.network).hashBuffer
-        : userAddress instanceof mvc.Address
-        ? userAddress.hashBuffer
-        : userAddress
+    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
+    const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
 
     // 从 poolTxHex 自动解析池与储备，SDK 计算报价
     const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
@@ -1724,10 +1838,8 @@ export class FtAmmPoolManager extends FtManager {
       poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = prevPoolProof.satoshiBytes
     }
 
-    const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
     // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
-    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
     const userSigLockContract = UserSigLockFactory.createContract({
       pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
     })
@@ -1895,14 +2007,21 @@ export class FtAmmPoolManager extends FtManager {
 
       // 解锁 UserSigLock（用户签名，授权预存 FT）
       {
+        const { pubKeyHex, sigHex } = await this._signUserSigLock(
+          txComposer,
+          userPrivKey,
+          userSigLockInputIndex,
+          userSigLockUtxo,
+          userSigLockContract
+        )
         const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
         const uslPreimage = new SigHashPreimage(
           toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
         )
         const uslCall = userSigLockContract.unlock({
           txPreimage: uslPreimage,
-          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
-          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+          senderPubKey: new PubKey(pubKeyHex),
+          senderSig: new Sig(sigHex),
         })
         if (this.debug) {
           const ret = uslCall.verify({
@@ -1915,11 +2034,7 @@ export class FtAmmPoolManager extends FtManager {
         txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
       }
 
-      const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
-      if (!feeKey) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM removeLiquidity: fee input needs feeWif or purse WIF.')
-      }
-      unlockP2PKHInputs(txComposer, [feeInputIndex], [feeKey])
+      await this._unlockFee(txComposer, feeInputIndex, feeWif)
     }
     checkFeeRate(txComposer, this.feeb)
 

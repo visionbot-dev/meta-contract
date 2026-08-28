@@ -1,0 +1,28 @@
+import "../../mcp02/contract/protoheader.scrypt";
+import "../../mcp02/contract/txUtil.scrypt";
+
+/**
+ * UserSigLock：用户 FT 预存锁（防 AMM 预存截胡）
+ *
+ * 预存流程：
+ * 1. 用户把 FT 普通转账到 UserSigLock 合约地址（tokenAddress = hash160(合约脚本)）
+ * 2. AMM 主交易中，该 FT 输入用 Token.op=2 解锁，
+ *    contractInputIndex 指向 UserSigLock 输入，contractTxProof 证明 UserSigLock UTXO
+ * 3. UserSigLock 输入在本交易中由用户签名解锁
+ *
+ * 安全性：只有持有 pubKeyHash 对应私钥的用户能解锁 UserSigLock，
+ * 第三方无法截胡预存在该合约地址上的 FT。
+ */
+contract UserSigLock {
+    Ripemd160 pubKeyHash;
+
+    public function unlock(
+        SigHashPreimage txPreimage,
+        PubKey senderPubKey,
+        Sig senderSig
+    ) {
+        require(hash160(senderPubKey) == this.pubKeyHash);
+        require(checkSig(senderSig, senderPubKey));
+        require(Tx.checkPreimageSigHashTypeOCS(txPreimage, ProtoHeader.SIG_HASH_ALL));
+    }
+}

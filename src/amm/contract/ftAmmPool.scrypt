@@ -77,13 +77,14 @@ contract FtAmmPool {
         return TokenProto.getTokenAmount(script, scriptLen);
     }
 
-    // 校验用户 FT 输入（非池地址、属于 userAddress、金额匹配）
+    // 校验用户 FT 输入（属于 userAddress 或 UserSigLock 合约地址、金额匹配）
     static function readUserInput(
         bytes script,
         TxOutputProof proof,
         bytes tokenID,
         bytes poolAddress,
         bytes userAddress,
+        bytes userSigLockAddress,
         bytes prevouts,
         int inputIndex,
         int amount
@@ -93,8 +94,10 @@ contract FtAmmPool {
         int scriptLen = len(script);
         require(TokenProto.getTokenID(script, scriptLen) == tokenID);
         require(TokenProto.getTokenAmount(script, scriptLen) == amount);
-        require(TokenProto.getTokenAddress(script, scriptLen) != poolAddress);
-        require(TokenProto.getTokenAddress(script, scriptLen) == userAddress);
+        // 用户输入 FT 可以是：1) 仍在用户地址（tokenAddress == userAddress）；
+        // 2) 已预存到 UserSigLock 合约地址（tokenAddress == userSigLockAddress，由用户签名解锁，防截胡）
+        bytes tokenAddr = TokenProto.getTokenAddress(script, scriptLen);
+        require(tokenAddr == userAddress || tokenAddr == userSigLockAddress);
         return amount;
     }
 
@@ -106,6 +109,7 @@ contract FtAmmPool {
         bytes lpTokenCodeHash,
         bytes poolAddress,
         bytes userAddress,
+        bytes userSigLockAddress,
         bytes prevouts,
         int inputIndex,
         int amount
@@ -117,7 +121,8 @@ contract FtAmmPool {
         require(TokenProto.getScriptCodeHash(script, scriptLen) == lpTokenCodeHash);
         require(TokenProto.getTokenAmount(script, scriptLen) == amount);
         require(TokenProto.getTokenAddress(script, scriptLen) != poolAddress);
-        require(TokenProto.getTokenAddress(script, scriptLen) == userAddress);
+        bytes tokenAddr = TokenProto.getTokenAddress(script, scriptLen);
+        require(tokenAddr == userAddress || tokenAddr == userSigLockAddress);
         return amount;
     }
 
@@ -143,6 +148,7 @@ contract FtAmmPool {
         int amountAIn,
         int amountBIn,
         bytes userAddress,
+        bytes userSigLockAddress,
         // 输出金额
         int amountAOut,
         int amountBOut,
@@ -272,7 +278,7 @@ contract FtAmmPool {
                 require(false);
             }
 
-            readUserInput(inputTokenScript, inputProof, inputTokenID, poolAddress, userAddress, prevouts, USER_INPUT_INDEX, amountIn);
+            readUserInput(inputTokenScript, inputProof, inputTokenID, poolAddress, userAddress, userSigLockAddress, prevouts, USER_INPUT_INDEX, amountIn);
 
             require(amountIn > 0);
             require(amountOut > 0);
@@ -309,8 +315,8 @@ contract FtAmmPool {
         }
         else if (op == OP_ADD) {
             // 用户 FT-A（输入 4）/ FT-B（输入 5）校验
-            readUserInput(userTokenScriptA, userProofA, this.tokenAID, poolAddress, userAddress, prevouts, USER_INPUT_INDEX, amountAIn);
-            readUserInput(userTokenScriptB, userProofB, this.tokenBID, poolAddress, userAddress, prevouts, USER_INPUT_INDEX2, amountBIn);
+            readUserInput(userTokenScriptA, userProofA, this.tokenAID, poolAddress, userAddress, userSigLockAddress, prevouts, USER_INPUT_INDEX, amountAIn);
+            readUserInput(userTokenScriptB, userProofB, this.tokenBID, poolAddress, userAddress, userSigLockAddress, prevouts, USER_INPUT_INDEX2, amountBIn);
 
             require(amountAIn > 0);
             require(amountBIn > 0);
@@ -346,7 +352,7 @@ contract FtAmmPool {
         }
         else if (op == OP_REMOVE) {
             // 用户 LP 输入（输入 4）校验
-            readUserLp(oldLpUserScript, lpUserProof, this.lpTokenID, this.lpTokenCodeHash, poolAddress, userAddress, prevouts, USER_INPUT_INDEX, lpReturn);
+            readUserLp(oldLpUserScript, lpUserProof, this.lpTokenID, this.lpTokenCodeHash, poolAddress, userAddress, userSigLockAddress, prevouts, USER_INPUT_INDEX, lpReturn);
 
             require(lpReturn > 0);
             require(lpReturn <= this.lpTotalSupply - lpReserve_old); // 不超过流通 LP

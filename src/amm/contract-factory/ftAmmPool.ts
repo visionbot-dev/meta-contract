@@ -35,6 +35,8 @@ export type FtAmmPoolUnlockArgs = {
   amountAIn?: number
   amountBIn?: number
   userAddress?: Bytes
+  /** 用户预存锁合约地址（UserSigLock，tokenAddress == hash160(合约脚本)） */
+  userSigLockAddress?: Bytes
   // 输出金额
   amountAOut?: number
   amountBOut?: number
@@ -124,6 +126,7 @@ export class FtAmmPool extends ContractAdapter {
       amountAIn: 0,
       amountBIn: 0,
       userAddress: new Bytes(''),
+      userSigLockAddress: new Bytes(''),
       amountAOut: 0,
       amountBOut: 0,
       lpMint: 0,
@@ -162,6 +165,7 @@ export class FtAmmPool extends ContractAdapter {
       opts.amountAIn,
       opts.amountBIn,
       opts.userAddress,
+      opts.userSigLockAddress,
       opts.amountAOut,
       opts.amountBOut,
       opts.lpMint,

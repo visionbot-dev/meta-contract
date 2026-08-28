@@ -1,4 +1,4 @@
-import { Bytes, buildTypeClasses, getPreimage, PubKey, Sig, SigHashPreimage, signTx, toHex } from '../scryptlib'
+import { Bytes, buildTypeClasses, getPreimage, PubKey, Ripemd160, Sig, SigHashPreimage, signTx, toHex } from '../scryptlib'
 import { CodeError, ErrCode } from '../common/error'
 import * as mvc from '../mvc'
 import { API_NET } from '../common/types'
@@ -16,6 +16,7 @@ import { TOKEN_UNLOCK_TYPE, TokenUnlockContractCheckFactory } from '../mcp02/con
 import { FtManager, Mcp02Options, ParamFtUtxo } from '../mcp02'
 import { FtAmmPoolFactory, FT_AMM_POOL_OP } from './contract-factory/ftAmmPool'
 import { FtAmmPoolGenesisFactory } from './contract-factory/ftAmmPoolGenesis'
+import { UserSigLockFactory } from './contract-factory/userSigLock'
 import { buildPoolLockingScript, AmmPoolParams, AmmPoolData } from './builder'
 import { getCreatePoolQuote } from './math'
 import { AmmSwapDirection } from './types'
@@ -77,12 +78,16 @@ export type AmmSwapParams = {
   /** 当前池 UTXO（txHex = 创建该池输出的交易，即上一笔操作/issue 交易） */
   poolUtxo: { txId: string; outputIndex: number; txHex: string }
   poolScript: Buffer
+  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
+  prevPoolTxHex?: string
   reserveAUtxo: ParamFtUtxo
   reserveBUtxo: ParamFtUtxo
   reserveLpUtxo: ParamFtUtxo
   direction: AmmSwapDirection
   /** 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），tokenAddress = userAddress */
   userUtxo: ParamFtUtxo
+  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
+  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   userWif: string
   userAddress: string | mvc.Address
   amountIn: BN
@@ -107,11 +112,15 @@ export type AmmAddLiquidityParams = {
   params: AmmPoolParams
   poolUtxo: { txId: string; outputIndex: number; txHex: string }
   poolScript: Buffer
+  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
+  prevPoolTxHex?: string
   reserveAUtxo: ParamFtUtxo
   reserveBUtxo: ParamFtUtxo
   reserveLpUtxo: ParamFtUtxo
   userAUtxo: ParamFtUtxo
   userBUtxo: ParamFtUtxo
+  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
+  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   userWif: string
   userAddress: string | mvc.Address
   amountAIn: BN
@@ -129,10 +138,14 @@ export type AmmRemoveLiquidityParams = {
   params: AmmPoolParams
   poolUtxo: { txId: string; outputIndex: number; txHex: string }
   poolScript: Buffer
+  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
+  prevPoolTxHex?: string
   reserveAUtxo: ParamFtUtxo
   reserveBUtxo: ParamFtUtxo
   reserveLpUtxo: ParamFtUtxo
   userLpUtxo: ParamFtUtxo
+  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
+  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   userWif: string
   userAddress: string | mvc.Address
   lpReturn: BN
@@ -657,11 +670,13 @@ export class FtAmmPoolManager extends FtManager {
       params: poolParams,
       poolUtxo,
       poolScript,
+      prevPoolTxHex,
       reserveAUtxo,
       reserveBUtxo,
       reserveLpUtxo,
       direction,
       userUtxo,
+      userSigLockUtxo,
       userWif,
       userAddress,
       amountIn,
@@ -796,6 +811,15 @@ export class FtAmmPoolManager extends FtManager {
       prevouts.addVout(uu.txId, uu.outputIndex)
       return idx
     })
+    // UserSigLock 输入：预存 FT 的控制合约，由用户签名解锁（防截胡）
+    const userSigLockTx = new mvc.Transaction(userSigLockUtxo.txHex)
+    const userSigLockInputIndex = txComposer.appendInput({
+      txId: userSigLockUtxo.txId,
+      outputIndex: userSigLockUtxo.outputIndex,
+      satoshis: userSigLockUtxo.satoshis,
+      lockingScript: userSigLockTx.outputs[userSigLockUtxo.outputIndex].script,
+    })
+    prevouts.addVout(userSigLockUtxo.txId, userSigLockUtxo.outputIndex)
     const feeInputIndex = addP2PKHInputs(txComposer, [feeUtxo])[0]
     prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
 
@@ -833,7 +857,7 @@ export class FtAmmPoolManager extends FtManager {
       [userInputIndex]: TokenUtil.getTxOutputProof(new mvc.Transaction(userUtxo.txHex), userUtxo.outputIndex),
     }
 
-    // Backtrace：从 poolUtxo.txHex 推导；prevOutpoint == genesisTxid 时跳过 prevPoolTxProof
+    // Backtrace：从 poolUtxo.txHex 推导；genesis 直接产出的池（poolUtxo.txId == genesisTxid && outputIndex == 0）跳过 prevPoolTxProof
     const poolInputRes = TokenUtil.getTxInputProof(poolTx, 0)
     const poolBacktraceArgs: any = {
       poolTxHeader: poolInputRes[1] as Bytes,
@@ -844,17 +868,28 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
     const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const poolPrevOutpointTxid = poolTx.inputs[0].prevTxId.toString('hex')
-    if (poolPrevOutpointTxid !== genesisTxid) {
-      const poolOutProof = TokenUtil.getTxOutputProof(poolTx, 0)
-      poolBacktraceArgs.prevPoolTxHeader = poolOutProof.txHeader
-      poolBacktraceArgs.prevPoolTxOutputHashProof = poolOutProof.hashProof
-      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = poolOutProof.satoshiBytes
+    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    if (!isGenesisPool) {
+      if (!prevPoolTxHex) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      }
+      const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
+      const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
+      poolBacktraceArgs.prevPoolTxHeader = prevPoolProof.txHeader
+      poolBacktraceArgs.prevPoolTxOutputHashProof = prevPoolProof.hashProof
+      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = prevPoolProof.satoshiBytes
     }
 
     // 两轮签名
     const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
+    // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
+    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
+    const userSigLockContract = UserSigLockFactory.createContract({
+      pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
+    })
+    const userSigLockContractProof = TokenUtil.getTxOutputProof(userSigLockTx, userSigLockUtxo.outputIndex)
+    const userSigLockAddressBuf = mvc.crypto.Hash.sha256ripemd160(userSigLockContract.lockingScript.toBuffer())
     for (let c = 0; c < 2; c++) {
       txComposer.clearChangeOutput()
       const changeOutputIndex = txComposer.appendChangeOutput(changeAddr, this.feeb)
@@ -896,7 +931,7 @@ export class FtAmmPoolManager extends FtManager {
           const unlockArgs: any = {
             txPreimage: txComposer.getInputPreimage(inputIndex),
             prevouts: new Bytes(prevouts.toHex()),
-            tokenInputIndex: 0,
+            tokenInputIndex: l.inputs.indexOf(inputIndex),
             amountCheckHashIndex: tokenUnlockType - 1,
             amountCheckInputIndex: ucInputIndexes[layouts.indexOf(l)],
             amountCheckTxOutputProofInfo,
@@ -907,20 +942,34 @@ export class FtAmmPoolManager extends FtManager {
             tokenTxHeader,
             tokenTxInputProof,
             prevTokenTxOutputProof,
-            contractInputIndex: poolInputIndex,
-            contractTxOutputProof,
-            operation: isUserInput ? ftProto.OP_TRANSFER : ftProto.OP_UNLOCK_FROM_CONTRACT,
+            // 储备输入由池合约控制；用户 FT 输入由 UserSigLock（用户签名）控制
+            contractInputIndex: isUserInput ? userSigLockInputIndex : poolInputIndex,
+            contractTxOutputProof: isUserInput ? new TxOutputProof(userSigLockContractProof) : new TxOutputProof(poolContractProof),
+            operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
           }
-          if (isUserInput) {
-            unlockArgs.senderPubKey = new PubKey(toHex(userPrivKey.publicKey.toBuffer()))
-            unlockArgs.senderSig = new Sig(
-              toHex(signTx(txComposer.getTx(), userPrivKey, ft.lockingScript, ft.satoshis, inputIndex, sighashType))
-            )
-          } else {
-            unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
-            unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
-          }
+          unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
+          unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
           const unlockCall = tokenContract.unlock(unlockArgs)
+          if (this.debug) {
+            const ret = unlockCall.verify({
+              tx: txComposer.getTx(),
+              inputIndex,
+              inputSatoshis: txComposer.getInput(inputIndex).output.satoshis,
+            })
+            if (!ret.success) {
+              const userAddrHex = ft.tokenAddress.hashBuffer.toString('hex')
+              console.error('Token unlock debug details:', {
+                inputIndex,
+                key: l.key,
+                isUserInput,
+                tokenInputIndexArg: l.inputs.indexOf(inputIndex),
+                amountCheckHashIndex: tokenUnlockType - 1,
+                contractInputIndex: poolInputIndex,
+                userAddrHex,
+              })
+              throw new Error(`AMM Token unlock failed (input ${inputIndex}): ${ret.error || JSON.stringify(ret)}`)
+            }
+          }
           txComposer.getInput(inputIndex).setScript(unlockCall.toScript() as mvc.Script)
 
           const td = layoutByKey[l.key]
@@ -956,6 +1005,7 @@ export class FtAmmPoolManager extends FtManager {
         amountAIn: aToB ? Number(amountIn.toString()) : 0,
         amountBIn: aToB ? 0 : Number(amountIn.toString()),
         userAddress: new Bytes(toHex(userAddrBuf)),
+        userSigLockAddress: new Bytes(toHex(userSigLockAddressBuf)),
         amountAOut: aToB ? 0 : Number(amountOut.toString()),
         amountBOut: aToB ? Number(amountOut.toString()) : 0,
         changeOutput: new Bytes(toHex(changeOutputBytes)),
@@ -973,6 +1023,14 @@ export class FtAmmPoolManager extends FtManager {
         poolUnlockArgs.userProofB = TokenUtil.getTxOutputProof(new mvc.Transaction(userUtxo.txHex), userUtxo.outputIndex)
       }
       const poolCall = poolContract.unlock(poolUnlockArgs)
+      if (this.debug) {
+        const ret = poolCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: poolInputIndex,
+          inputSatoshis: txComposer.getInput(poolInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw new Error(`AMM swap FtAmmPool unlock failed: ${ret.error || JSON.stringify(ret)}`)
+      }
       txComposer.getInput(poolInputIndex).setScript(poolCall.toScript() as mvc.Script)
 
       // 3) 解锁 amountCheck
@@ -1012,6 +1070,28 @@ export class FtAmmPoolManager extends FtManager {
         txComposer.getInput(ucInputIndex).setScript(ucCall.toScript() as mvc.Script)
       }
 
+      // 3.5) 解锁 UserSigLock（用户签名，授权预存 FT）
+      {
+        const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
+        const uslPreimage = new SigHashPreimage(
+          toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
+        )
+        const uslCall = userSigLockContract.unlock({
+          txPreimage: uslPreimage,
+          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
+          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+        })
+        if (this.debug) {
+          const ret = uslCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: userSigLockInputIndex,
+            inputSatoshis: userSigLockUtxo.satoshis,
+          })
+          if (!ret.success) throw new Error(`AMM swap UserSigLock unlock failed: ${ret.error || JSON.stringify(ret)}`)
+        }
+        txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
+      }
+
       // 4) SPACE fee
       const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
       if (!feeKey) {
@@ -1034,11 +1114,13 @@ export class FtAmmPoolManager extends FtManager {
       params: poolParams,
       poolUtxo,
       poolScript,
+      prevPoolTxHex,
       reserveAUtxo,
       reserveBUtxo,
       reserveLpUtxo,
       userAUtxo,
       userBUtxo,
+      userSigLockUtxo,
       userWif,
       userAddress,
       amountAIn,
@@ -1145,6 +1227,15 @@ export class FtAmmPoolManager extends FtManager {
       prevouts.addVout(uu.txId, uu.outputIndex)
       return idx
     })
+    // UserSigLock 输入：预存 FT 的控制合约，由用户签名解锁（防截胡）
+    const userSigLockTx = new mvc.Transaction(userSigLockUtxo.txHex)
+    const userSigLockInputIndex = txComposer.appendInput({
+      txId: userSigLockUtxo.txId,
+      outputIndex: userSigLockUtxo.outputIndex,
+      satoshis: userSigLockUtxo.satoshis,
+      lockingScript: userSigLockTx.outputs[userSigLockUtxo.outputIndex].script,
+    })
+    prevouts.addVout(userSigLockUtxo.txId, userSigLockUtxo.outputIndex)
     const feeInputIndex = addP2PKHInputs(txComposer, [feeUtxo])[0]
     prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
 
@@ -1193,16 +1284,27 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
     const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const poolPrevOutpointTxid = poolTx.inputs[0].prevTxId.toString('hex')
-    if (poolPrevOutpointTxid !== genesisTxid) {
-      const poolOutProof = TokenUtil.getTxOutputProof(poolTx, 0)
-      poolBacktraceArgs.prevPoolTxHeader = poolOutProof.txHeader
-      poolBacktraceArgs.prevPoolTxOutputHashProof = poolOutProof.hashProof
-      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = poolOutProof.satoshiBytes
+    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    if (!isGenesisPool) {
+      if (!prevPoolTxHex) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      }
+      const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
+      const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
+      poolBacktraceArgs.prevPoolTxHeader = prevPoolProof.txHeader
+      poolBacktraceArgs.prevPoolTxOutputHashProof = prevPoolProof.hashProof
+      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = prevPoolProof.satoshiBytes
     }
 
     const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
+    // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
+    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
+    const userSigLockContract = UserSigLockFactory.createContract({
+      pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
+    })
+    const userSigLockContractProof = TokenUtil.getTxOutputProof(userSigLockTx, userSigLockUtxo.outputIndex)
+    const userSigLockAddressBuf = mvc.crypto.Hash.sha256ripemd160(userSigLockContract.lockingScript.toBuffer())
     for (let c = 0; c < 2; c++) {
       txComposer.clearChangeOutput()
       const changeOutputIndex = txComposer.appendChangeOutput(changeAddr, this.feeb)
@@ -1243,7 +1345,7 @@ export class FtAmmPoolManager extends FtManager {
           const unlockArgs: any = {
             txPreimage: txComposer.getInputPreimage(inputIndex),
             prevouts: new Bytes(prevouts.toHex()),
-            tokenInputIndex: 0,
+            tokenInputIndex: l.inputs.indexOf(inputIndex),
             amountCheckHashIndex: tokenUnlockType - 1,
             amountCheckInputIndex: ucInputIndexes[layouts.indexOf(l)],
             amountCheckTxOutputProofInfo,
@@ -1254,20 +1356,22 @@ export class FtAmmPoolManager extends FtManager {
             tokenTxHeader,
             tokenTxInputProof,
             prevTokenTxOutputProof,
-            contractInputIndex: poolInputIndex,
-            contractTxOutputProof,
-            operation: isUserInput ? ftProto.OP_TRANSFER : ftProto.OP_UNLOCK_FROM_CONTRACT,
+            // 储备输入由池合约控制；用户 FT 输入由 UserSigLock（用户签名）控制
+            contractInputIndex: isUserInput ? userSigLockInputIndex : poolInputIndex,
+            contractTxOutputProof: isUserInput ? new TxOutputProof(userSigLockContractProof) : new TxOutputProof(poolContractProof),
+            operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
           }
-          if (isUserInput) {
-            unlockArgs.senderPubKey = new PubKey(toHex(userPrivKey.publicKey.toBuffer()))
-            unlockArgs.senderSig = new Sig(
-              toHex(signTx(txComposer.getTx(), userPrivKey, ft.lockingScript, ft.satoshis, inputIndex, sighashType))
-            )
-          } else {
-            unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
-            unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
-          }
+          unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
+          unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
           const unlockCall = tokenContract.unlock(unlockArgs)
+          if (this.debug) {
+            const ret = unlockCall.verify({
+              tx: txComposer.getTx(),
+              inputIndex,
+              inputSatoshis: txComposer.getInput(inputIndex).output.satoshis,
+            })
+            if (!ret.success) throw new Error(`AMM Token unlock failed (input ${inputIndex}): ${ret.error || JSON.stringify(ret)}`)
+          }
           txComposer.getInput(inputIndex).setScript(unlockCall.toScript() as mvc.Script)
 
           const td = layoutByKey[l.key]
@@ -1303,6 +1407,7 @@ export class FtAmmPoolManager extends FtManager {
         amountAIn: Number(amountAIn.toString()),
         amountBIn: Number(amountBIn.toString()),
         userAddress: new Bytes(toHex(userAddrBuf)),
+        userSigLockAddress: new Bytes(toHex(userSigLockAddressBuf)),
         lpMint: Number(lpMint.toString()),
         changeOutput: new Bytes(toHex(changeOutputBytes)),
         poolSatoshis: 1,
@@ -1313,6 +1418,14 @@ export class FtAmmPoolManager extends FtManager {
         ...poolBacktraceArgs,
       }
       const poolCall = poolContract.unlock(poolUnlockArgs)
+      if (this.debug) {
+        const ret = poolCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: poolInputIndex,
+          inputSatoshis: txComposer.getInput(poolInputIndex).output.satoshis,
+        })
+        if (!ret.success) throw new Error(`AMM addLiquidity FtAmmPool unlock failed: ${ret.error || JSON.stringify(ret)}`)
+      }
       txComposer.getInput(poolInputIndex).setScript(poolCall.toScript() as mvc.Script)
 
       for (let i = 0; i < tokenCheckData.length; i++) {
@@ -1351,6 +1464,28 @@ export class FtAmmPoolManager extends FtManager {
         txComposer.getInput(ucInputIndex).setScript(ucCall.toScript() as mvc.Script)
       }
 
+      // 解锁 UserSigLock（用户签名，授权预存 FT）
+      {
+        const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
+        const uslPreimage = new SigHashPreimage(
+          toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
+        )
+        const uslCall = userSigLockContract.unlock({
+          txPreimage: uslPreimage,
+          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
+          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+        })
+        if (this.debug) {
+          const ret = uslCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: userSigLockInputIndex,
+            inputSatoshis: userSigLockUtxo.satoshis,
+          })
+          if (!ret.success) throw new Error(`AMM addLiquidity UserSigLock unlock failed: ${ret.error || JSON.stringify(ret)}`)
+        }
+        txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
+      }
+
       const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey
       if (!feeKey) {
         throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM addLiquidity: fee input needs feeWif or purse WIF.')
@@ -1372,10 +1507,12 @@ export class FtAmmPoolManager extends FtManager {
       params: poolParams,
       poolUtxo,
       poolScript,
+      prevPoolTxHex,
       reserveAUtxo,
       reserveBUtxo,
       reserveLpUtxo,
       userLpUtxo,
+      userSigLockUtxo,
       userWif,
       userAddress,
       lpReturn,
@@ -1487,6 +1624,15 @@ export class FtAmmPoolManager extends FtManager {
       prevouts.addVout(uu.txId, uu.outputIndex)
       return idx
     })
+    // UserSigLock 输入：预存 FT 的控制合约，由用户签名解锁（防截胡）
+    const userSigLockTx = new mvc.Transaction(userSigLockUtxo.txHex)
+    const userSigLockInputIndex = txComposer.appendInput({
+      txId: userSigLockUtxo.txId,
+      outputIndex: userSigLockUtxo.outputIndex,
+      satoshis: userSigLockUtxo.satoshis,
+      lockingScript: userSigLockTx.outputs[userSigLockUtxo.outputIndex].script,
+    })
+    prevouts.addVout(userSigLockUtxo.txId, userSigLockUtxo.outputIndex)
     const feeInputIndex = addP2PKHInputs(txComposer, [feeUtxo])[0]
     prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
 
@@ -1534,16 +1680,27 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
     const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const poolPrevOutpointTxid = poolTx.inputs[0].prevTxId.toString('hex')
-    if (poolPrevOutpointTxid !== genesisTxid) {
-      const poolOutProof = TokenUtil.getTxOutputProof(poolTx, 0)
-      poolBacktraceArgs.prevPoolTxHeader = poolOutProof.txHeader
-      poolBacktraceArgs.prevPoolTxOutputHashProof = poolOutProof.hashProof
-      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = poolOutProof.satoshiBytes
+    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    if (!isGenesisPool) {
+      if (!prevPoolTxHex) {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      }
+      const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
+      const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
+      poolBacktraceArgs.prevPoolTxHeader = prevPoolProof.txHeader
+      poolBacktraceArgs.prevPoolTxOutputHashProof = prevPoolProof.hashProof
+      poolBacktraceArgs.prevPoolTxOutputSatoshiBytes = prevPoolProof.satoshiBytes
     }
 
     const userPrivKey = mvc.PrivateKey.fromWIF(userWif)
     const poolContractProof = TokenUtil.getTxOutputProof(poolTx, poolUtxo.outputIndex)
+    // UserSigLock：用户预存 FT 的控制合约（tokenAddress == hash160(合约脚本)）
+    const userPubKeyHash = mvc.crypto.Hash.sha256ripemd160(userPrivKey.publicKey.toBuffer())
+    const userSigLockContract = UserSigLockFactory.createContract({
+      pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
+    })
+    const userSigLockContractProof = TokenUtil.getTxOutputProof(userSigLockTx, userSigLockUtxo.outputIndex)
+    const userSigLockAddressBuf = mvc.crypto.Hash.sha256ripemd160(userSigLockContract.lockingScript.toBuffer())
     for (let c = 0; c < 2; c++) {
       txComposer.clearChangeOutput()
       const changeOutputIndex = txComposer.appendChangeOutput(changeAddr, this.feeb)
@@ -1584,7 +1741,7 @@ export class FtAmmPoolManager extends FtManager {
           const unlockArgs: any = {
             txPreimage: txComposer.getInputPreimage(inputIndex),
             prevouts: new Bytes(prevouts.toHex()),
-            tokenInputIndex: 0,
+            tokenInputIndex: l.inputs.indexOf(inputIndex),
             amountCheckHashIndex: tokenUnlockType - 1,
             amountCheckInputIndex: ucInputIndexes[layouts.indexOf(l)],
             amountCheckTxOutputProofInfo,
@@ -1595,20 +1752,22 @@ export class FtAmmPoolManager extends FtManager {
             tokenTxHeader,
             tokenTxInputProof,
             prevTokenTxOutputProof,
-            contractInputIndex: poolInputIndex,
-            contractTxOutputProof,
-            operation: isUserInput ? ftProto.OP_TRANSFER : ftProto.OP_UNLOCK_FROM_CONTRACT,
+            // 储备输入由池合约控制；用户 FT 输入由 UserSigLock（用户签名）控制
+            contractInputIndex: isUserInput ? userSigLockInputIndex : poolInputIndex,
+            contractTxOutputProof: isUserInput ? new TxOutputProof(userSigLockContractProof) : new TxOutputProof(poolContractProof),
+            operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
           }
-          if (isUserInput) {
-            unlockArgs.senderPubKey = new PubKey(toHex(userPrivKey.publicKey.toBuffer()))
-            unlockArgs.senderSig = new Sig(
-              toHex(signTx(txComposer.getTx(), userPrivKey, ft.lockingScript, ft.satoshis, inputIndex, sighashType))
-            )
-          } else {
-            unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
-            unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
-          }
+          unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
+          unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
           const unlockCall = tokenContract.unlock(unlockArgs)
+          if (this.debug) {
+            const ret = unlockCall.verify({
+              tx: txComposer.getTx(),
+              inputIndex,
+              inputSatoshis: txComposer.getInput(inputIndex).output.satoshis,
+            })
+            if (!ret.success) throw new Error(`AMM Token unlock failed (input ${inputIndex}): ${ret.error || JSON.stringify(ret)}`)
+          }
           txComposer.getInput(inputIndex).setScript(unlockCall.toScript() as mvc.Script)
 
           const td = layoutByKey[l.key]
@@ -1641,6 +1800,7 @@ export class FtAmmPoolManager extends FtManager {
         lpUserProof: TokenUtil.getTxOutputProof(new mvc.Transaction(userLpUtxo.txHex), userLpUtxo.outputIndex),
         lpReturn: Number(lpReturn.toString()),
         userAddress: new Bytes(toHex(userAddrBuf)),
+        userSigLockAddress: new Bytes(toHex(userSigLockAddressBuf)),
         amountAOut: Number(outA.toString()),
         amountBOut: Number(outB.toString()),
         changeOutput: new Bytes(toHex(changeOutputBytes)),
@@ -1653,6 +1813,16 @@ export class FtAmmPoolManager extends FtManager {
         ...poolBacktraceArgs,
       }
       const poolCall = poolContract.unlock(poolUnlockArgs)
+      if (this.debug) {
+        const ret = poolCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: poolInputIndex,
+          inputSatoshis: txComposer.getInput(poolInputIndex).output.satoshis,
+        })
+        if (!ret.success) {
+          throw new Error(`AMM removeLiquidity FtAmmPool unlock failed: ${ret.error || JSON.stringify(ret)}`)
+        }
+      }
       txComposer.getInput(poolInputIndex).setScript(poolCall.toScript() as mvc.Script)
 
       for (let i = 0; i < tokenCheckData.length; i++) {
@@ -1689,6 +1859,28 @@ export class FtAmmPoolManager extends FtManager {
           otherOutputArray: new Bytes(toHex(otherOutputArray)),
         })
         txComposer.getInput(ucInputIndex).setScript(ucCall.toScript() as mvc.Script)
+      }
+
+      // 解锁 UserSigLock（用户签名，授权预存 FT）
+      {
+        const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
+        const uslPreimage = new SigHashPreimage(
+          toHex(getPreimage(txComposer.getTx(), uslSubScript, userSigLockUtxo.satoshis, userSigLockInputIndex))
+        )
+        const uslCall = userSigLockContract.unlock({
+          txPreimage: uslPreimage,
+          senderPubKey: new PubKey(toHex(userPrivKey.publicKey.toBuffer())),
+          senderSig: new Sig(toHex(signTx(txComposer.getTx(), userPrivKey, userSigLockContract.lockingScript, userSigLockUtxo.satoshis, userSigLockInputIndex, sighashType))),
+        })
+        if (this.debug) {
+          const ret = uslCall.verify({
+            tx: txComposer.getTx(),
+            inputIndex: userSigLockInputIndex,
+            inputSatoshis: userSigLockUtxo.satoshis,
+          })
+          if (!ret.success) throw new Error(`AMM removeLiquidity UserSigLock unlock failed: ${ret.error || JSON.stringify(ret)}`)
+        }
+        txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
       }
 
       const feeKey = feeWif ? mvc.PrivateKey.fromWIF(feeWif) : this._pursePrivateKey

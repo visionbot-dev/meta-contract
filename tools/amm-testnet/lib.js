@@ -157,4 +157,32 @@ async function getTokenPrevTxHex(txHex, ftOutputIndex, genesis) {
   throw new Error(`cannot find token input prev tx for genesis ${genesis}`)
 }
 
-module.exports = { rpc, fund, getUtxos, getUnspentUtxos, getFtUtxos, broadcast, getTx, getRawTx, getTokenPrevTxHex, INDEXER }
+/** 创建 UserSigLock 合约 UTXO（1 sat），返回 { txId, outputIndex, satoshis, txHex, addressHash, addressStr } */
+async function createUserSigLockUtxo(wif, utxos) {
+  const { mvc } = require('../../dist/index')
+  const { UserSigLockFactory } = require('../../dist/amm/index.js')
+  const { Ripemd160 } = require('../../dist/scryptlib')
+  const { TxComposer } = require('../../dist/tx-composer')
+  const { addP2PKHInputs, addChangeOutput, checkFeeRate, unlockP2PKHInputs } = require('../../dist/helpers/transactionHelpers.js')
+  const NETWORK = 'testnet'
+  const priv = mvc.PrivateKey.fromWIF(wif)
+  const pubKeyHash = mvc.crypto.Hash.sha256ripemd160(priv.publicKey.toBuffer())
+  const contract = UserSigLockFactory.createContract({ pubKeyHash: new Ripemd160(pubKeyHash.toString('hex')) })
+  const script = contract.lockingScript
+  const addressHash = mvc.crypto.Hash.sha256ripemd160(script.toBuffer()).toString('hex')
+  const addressStr = mvc.Address.fromPublicKeyHash(Buffer.from(addressHash, 'hex'), NETWORK).toString()
+
+  const tx = new TxComposer()
+  const inIdx = addP2PKHInputs(tx, utxos.map((u) => ({ ...u, wif })))
+  tx.appendOutput({ lockingScript: script, satoshis: 1 })
+  addChangeOutput(tx, mvc.Address.fromPrivateKey(priv, NETWORK), 0.5)
+  unlockP2PKHInputs(tx, inIdx, utxos.map(() => priv))
+  checkFeeRate(tx, 0.5)
+  const hex = tx.getRawHex()
+  const txid = tx.getTxId()
+  const res = await broadcast(hex)
+  if (res && res.message !== 'ok') throw new Error(`createUserSigLockUtxo broadcast failed: ${JSON.stringify(res)}`)
+  return { txId: txid, outputIndex: 0, satoshis: 1, txHex: hex, addressHash, addressStr }
+}
+
+module.exports = { rpc, fund, getUtxos, getUnspentUtxos, getFtUtxos, broadcast, getTx, getRawTx, getTokenPrevTxHex, createUserSigLockUtxo, INDEXER }

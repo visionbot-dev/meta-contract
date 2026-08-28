@@ -196,6 +196,53 @@ describe('FtAmmPool contract unlock (local scrypt test, post-issue)', () => {
     verify(call, tx)
   })
 
+  it('SWAP A->B with user input pre-locked at UserSigLock address should verify', () => {
+    const USER_SIGLOCK_ADDRESS = '03'.repeat(20)
+    const userAScriptLock = ftProto.getNewTokenScript(reserveAScript, Buffer.from(USER_SIGLOCK_ADDRESS, 'hex'), new BN(100))
+    const userTxLock = new mvc.Transaction()
+    userTxLock.version = 10
+    userTxLock.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(userAScriptLock), satoshis: SATOSHIS }))
+    const tx = new mvc.Transaction()
+    tx.version = 10
+    addPoolReserveInputs(tx)
+    tx.addInput(new mvc.Transaction.Input({ prevTxId: getSatotxId(userTxLock), outputIndex: 0, script: mvc.Script.empty() }), mvc.Script.fromBuffer(userAScriptLock), SATOSHIS)
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(poolScript), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveAScript, poolAddress, new BN(1100))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveBScript, poolAddress, new BN(910))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lpReserveScript, poolAddress, new BN(900))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveBScript, USER_ADDRESS, new BN(90))), satoshis: SATOSHIS }))
+    const prevouts = buildPrevouts(tx)
+    const preimage = getPreimage(tx, contractSubScript, SATOSHIS, 0, mvc.crypto.Signature.SIGHASH_ALL | mvc.crypto.Signature.SIGHASH_FORKID)
+    const call = contract.unlock({
+      txPreimage: new SigHashPreimage(toHex(preimage)),
+      prevouts: new Bytes(toHex(prevouts)),
+      poolScript: new Bytes(toHex(poolScript)),
+      poolProof: createTxOutputProof(issueTx, 0),
+      op: FT_AMM_POOL_OP.SWAP,
+      swapDirection: 1,
+      oldTokenAScript: new Bytes(toHex(reserveAScript)),
+      oldTokenBScript: new Bytes(toHex(reserveBScript)),
+      oldLpScript: new Bytes(toHex(lpReserveScript)),
+      proofA: createTxOutputProof(issueTx, 1),
+      proofB: createTxOutputProof(issueTx, 2),
+      proofLp: createTxOutputProof(issueTx, 3),
+      userTokenScriptA: new Bytes(toHex(userAScriptLock)),
+      userProofA: createTxOutputProof(userTxLock, 0),
+      amountAIn: 100,
+      userAddress: new Bytes(toHex(USER_ADDRESS)),
+      userSigLockAddress: new Bytes(toHex(USER_SIGLOCK_ADDRESS)),
+      amountBOut: 90,
+      changeOutput: new Bytes(''),
+      poolSatoshis: SATOSHIS,
+      reserveASatoshis: SATOSHIS,
+      reserveBSatoshis: SATOSHIS,
+      lpReserveSatoshis: SATOSHIS,
+      userBSatoshis: SATOSHIS,
+      ...backtraceArgs(),
+    })
+    verify(call, tx)
+  })
+
   it('SWAP B->A should verify', () => {
     const tx = new mvc.Transaction()
     tx.version = 10
@@ -310,6 +357,55 @@ describe('FtAmmPool contract unlock (local scrypt test, post-issue)', () => {
       lpUserProof: createTxOutputProof(userLpTx, 0),
       lpReturn: 10,
       userAddress: new Bytes(toHex(USER_ADDRESS)),
+      amountAOut: 100,
+      amountBOut: 100,
+      changeOutput: new Bytes(''),
+      poolSatoshis: SATOSHIS,
+      reserveASatoshis: SATOSHIS,
+      reserveBSatoshis: SATOSHIS,
+      lpReserveSatoshis: SATOSHIS,
+      userASatoshis: SATOSHIS,
+      userBSatoshis: SATOSHIS,
+      ...backtraceArgs(),
+    })
+    verify(call, tx)
+  })
+
+  it('REMOVE with user LP pre-locked at UserSigLock should verify', () => {
+    const USER_SIGLOCK_ADDRESS = '03'.repeat(20)
+    const userLpScriptLock = ftProto.getNewTokenScript(lpReserveScript, Buffer.from(USER_SIGLOCK_ADDRESS, 'hex'), new BN(10))
+    const userLpTxLock = new mvc.Transaction()
+    userLpTxLock.version = 10
+    userLpTxLock.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(userLpScriptLock), satoshis: SATOSHIS }))
+    const tx = new mvc.Transaction()
+    tx.version = 10
+    addPoolReserveInputs(tx)
+    tx.addInput(new mvc.Transaction.Input({ prevTxId: getSatotxId(userLpTxLock), outputIndex: 0, script: mvc.Script.empty() }), mvc.Script.fromBuffer(userLpScriptLock), SATOSHIS)
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(poolScript), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveAScript, poolAddress, new BN(900))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveBScript, poolAddress, new BN(900))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(lpReserveScript, poolAddress, new BN(910))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveAScript, USER_ADDRESS, new BN(100))), satoshis: SATOSHIS }))
+    tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(ftProto.getNewTokenScript(reserveBScript, USER_ADDRESS, new BN(100))), satoshis: SATOSHIS }))
+    const prevouts = buildPrevouts(tx)
+    const preimage = getPreimage(tx, contractSubScript, SATOSHIS, 0, mvc.crypto.Signature.SIGHASH_ALL | mvc.crypto.Signature.SIGHASH_FORKID)
+    const call = contract.unlock({
+      txPreimage: new SigHashPreimage(toHex(preimage)),
+      prevouts: new Bytes(toHex(prevouts)),
+      poolScript: new Bytes(toHex(poolScript)),
+      poolProof: createTxOutputProof(issueTx, 0),
+      op: FT_AMM_POOL_OP.REMOVE,
+      oldTokenAScript: new Bytes(toHex(reserveAScript)),
+      oldTokenBScript: new Bytes(toHex(reserveBScript)),
+      oldLpScript: new Bytes(toHex(lpReserveScript)),
+      proofA: createTxOutputProof(issueTx, 1),
+      proofB: createTxOutputProof(issueTx, 2),
+      proofLp: createTxOutputProof(issueTx, 3),
+      oldLpUserScript: new Bytes(toHex(userLpScriptLock)),
+      lpUserProof: createTxOutputProof(userLpTxLock, 0),
+      lpReturn: 10,
+      userAddress: new Bytes(toHex(USER_ADDRESS)),
+      userSigLockAddress: new Bytes(toHex(USER_SIGLOCK_ADDRESS)),
       amountAOut: 100,
       amountBOut: 100,
       changeOutput: new Bytes(''),

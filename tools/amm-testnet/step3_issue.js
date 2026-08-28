@@ -88,7 +88,7 @@ async function main() {
   console.log('main broadcast:', JSON.stringify(br))
   await waitMempool(res.txid)
 
-  const newState = { ...state, issue: { unlockCheckTxid: res.unlockCheckTxid, mainTxid: res.txid, poolScript: res.poolScript.toString('hex'), poolAddress: res.poolAddress.toString('hex') } }
+  const newState = { ...state, issue: { unlockCheckTxid: res.unlockCheckTxid, mainTxid: res.txid, txHex: res.txHex, poolScript: res.poolScript.toString('hex'), poolAddress: res.poolAddress.toString('hex') } }
   fs.writeFileSync(STATE_FILE, JSON.stringify(newState, null, 2))
   console.log('state updated, poolAddress:', res.poolAddress.toString('hex'))
 }

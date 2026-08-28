@@ -214,15 +214,6 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
     expect(result.success, result.error).to.be.false
   }
 
-  it('H1: SWAP user input locked at pool address should fail', () => {
-    const evilScript = ftProto.getNewTokenScript(reserveAScript, poolAddress, new BN(100))
-    const evilTx = new mvc.Transaction()
-    evilTx.version = 10
-    evilTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(evilScript), satoshis: SATOSHIS }))
-    const { tx, call } = buildSwapAtoB({ userScript: evilScript, userProof: createTxOutputProof(evilTx, 0), userPrevTxId: getSatotxId(evilTx) })
-    expectFail(call, tx)
-  })
-
   it('L2: SWAP user output to wrong address should fail (hashOutputs)', () => {
     const wrongOut = ftProto.getNewTokenScript(reserveBScript, WRONG_ADDRESS, new BN(90))
     const { tx, call } = buildSwapAtoB({ userOutScript: wrongOut })

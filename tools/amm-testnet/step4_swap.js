@@ -6,7 +6,7 @@ const { mvc, FtManager } = require('../../dist/index')
 const { FtAmmPoolManager } = require('../../dist/amm/index.js')
 const { getSwapQuote } = require('../../dist/amm/index.js')
 const { privateKey } = require('../../privateKey')
-const { getUnspentUtxos, getFtUtxos, broadcast, getRawTx, getTokenPrevTxHex } = require('./lib')
+const { getUnspentUtxos, getFtUtxos, broadcast, getRawTx, getTokenPrevTxHex, createUserSigLockUtxo } = require('./lib')
 
 const NETWORK = 'testnet'
 const STATE_FILE = path.join(__dirname, 'amm-state.json')
@@ -88,8 +88,39 @@ async function main() {
   if (!u100) throw new Error('no 100000 A utxo after split')
   const u100Hex = await getRawTx(u100.txid)
   const u100Pre = await getTokenPrevTxHex(u100Hex, u100.txIndex, TOKENS.A.genesis)
-  const userA = { txId: u100.txid, outputIndex: u100.txIndex, satoshis: u100.satoshi, tokenAddress: u100.address, tokenAmount: u100.valueString, txHex: u100Hex, preTxHex: u100Pre }
-  console.log('userA:', userA.tokenAmount, userA.txId.slice(0, 12), userA.outputIndex)
+  const u100utxo = { txId: u100.txid, outputIndex: u100.txIndex, satoshis: u100.satoshi, tokenAddress: u100.address, tokenAmount: u100.valueString, txHex: u100Hex, preTxHex: u100Pre }
+
+  // 创建 UserSigLock UTXO（防截胡：预存 FT 只能由用户签名解锁）
+  const usl = await createUserSigLockUtxo(WIF, await getUnspentUtxos(A1))
+  await waitMempool(usl.txId)
+  console.log('UserSigLock:', usl.addressStr, usl.txId.slice(0, 12))
+
+  // 预存：把 100000 TOKEN_A 普通转账到 UserSigLock 合约地址（tokenAddress 变为合约地址，主交易 op=2 + UserSigLock 解锁）
+  console.log('preLock user A to UserSigLock:', usl.addressStr)
+  const pre = await mgrFt.transfer({
+    codehash: TOKENS.A.codehash,
+    genesis: TOKENS.A.genesis,
+    receivers: [{ address: usl.addressStr, amount: '100000' }],
+    senderWif: WIF,
+    ftUtxos: [u100utxo],
+    utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: WIF })),
+    changeAddress: A1,
+    ftChangeAddress: A1,
+  })
+  if (pre.routeCheckTxHex) {
+    await broadcast(pre.routeCheckTxHex)
+    await waitMempool(new mvc.Transaction(pre.routeCheckTxHex).id)
+  }
+  await broadcast(pre.txHex)
+  await waitMempool(pre.txid)
+
+  const pList = await getFtUtxos(usl.addressStr, TOKENS.A.codehash, TOKENS.A.genesis)
+  const uP = pList.find((x) => x.valueString === '100000')
+  if (!uP) throw new Error('no 100000 A utxo at UserSigLock after preLock')
+  const uPHex = await getRawTx(uP.txid)
+  const uPPre = await getTokenPrevTxHex(uPHex, uP.txIndex, TOKENS.A.genesis)
+  const userA = { txId: uP.txid, outputIndex: uP.txIndex, satoshis: uP.satoshi, tokenAddress: uP.address, tokenAmount: uP.valueString, txHex: uPHex, preTxHex: uPPre }
+  console.log('userA (at UserSigLock):', userA.tokenAmount, userA.txId.slice(0, 12), userA.outputIndex)
 
   // quote: A->B with amountIn 100000
   const amountIn = new BN(100000)
@@ -120,6 +151,7 @@ async function main() {
     reserveLpUtxo: reserveLp,
     direction: 1,
     userUtxo: userA,
+    userSigLockUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
     userWif: WIF,
     userAddress: A1,
     amountIn,
@@ -133,6 +165,8 @@ async function main() {
   })
   console.log('swap unlockCheck txid:', res.unlockCheckTxid)
   console.log('swap main txid:', res.txid)
+  fs.writeFileSync(path.join(__dirname, 'swap-unlockcheck.hex'), res.unlockCheckTxHex)
+  fs.writeFileSync(path.join(__dirname, 'swap-main.hex'), res.txHex)
 
   const rc = await broadcast(res.unlockCheckTxHex)
   console.log('unlockCheck broadcast:', JSON.stringify(rc))
@@ -142,7 +176,15 @@ async function main() {
   console.log('main broadcast:', JSON.stringify(br))
   await waitMempool(res.txid)
 
-  state.swap = { unlockCheckTxid: res.unlockCheckTxid, mainTxid: res.txid }
+  const mainTx = new mvc.Transaction(res.txHex)
+  const newPoolScriptBuf = mainTx.outputs[0].script.toBuffer()
+  state.swap = {
+    unlockCheckTxid: res.unlockCheckTxid,
+    mainTxid: res.txid,
+    txHex: res.txHex,
+    poolScript: newPoolScriptBuf.toString('hex'),
+    poolAddress: mvc.crypto.Hash.sha256ripemd160(newPoolScriptBuf).toString('hex'),
+  }
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
   console.log('swap done')
 }

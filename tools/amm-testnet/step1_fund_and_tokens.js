@@ -93,7 +93,7 @@ async function main() {
   const tokens = {}
   tokens.A = await createToken('TOKEN_A', 'A', 2000000)
   tokens.B = await createToken('TOKEN_B', 'B', 2000000)
-  tokens.LP = await createToken('AMM_LP', 'LP', 1000001)
+  tokens.LP = await createToken('AMM_LP', 'LP', 2000001)
   console.log('tokens:', JSON.stringify(tokens, null, 2))
   require('fs').writeFileSync(require('path').join(__dirname, 'tokens.json'), JSON.stringify(tokens, null, 2))
 }

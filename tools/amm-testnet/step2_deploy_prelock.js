@@ -95,7 +95,7 @@ async function main() {
     tokenBID: TOKENS.B.genesis,
     lpTokenCodeHash: TOKENS.LP.codehash,
     lpTokenID: TOKENS.LP.genesis,
-    lpTotalSupply: new BN(1000001),
+    lpTotalSupply: new BN(2000001),
     minReserve: new BN(1),
     feeBps: 30,
   }
@@ -133,8 +133,8 @@ async function main() {
     const res = await mgr.preLockReserve({
       codehash: t.codehash,
       genesis: t.genesis,
-      // A/B 只锁 1000000，留 1000000 在 a1 供 swap；LP 锁 1000001（池内储备 1）
-      amount: new BN(key === 'LP' ? 1000001 : 1000000),
+      // A/B 只锁 1000000，留 1000000 在 a1 供 swap；LP 全锁 2000001（issue 后池内储备 1000001，可支持后续 add）
+      amount: new BN(key === 'LP' ? 2000001 : 1000000),
       toAddress: genAddressStr,
       ftUtxo: { ...ftUtxo, wif: privateKey.toWIF() },
       utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: privateKey.toWIF() })),

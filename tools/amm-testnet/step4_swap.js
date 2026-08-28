@@ -146,17 +146,18 @@ async function main() {
     purse: WIF,
     feeb: 0.5,
     debug: true,
-    // SDK 内部自动补齐储备 FT 前序交易 / SPACE 输入
-    fetchTxHex: async (txid) => getRawTx(txid),
-    fetchUtxosByAddress: async (addr) => getUnspentUtxos(addr),
   })
   const res = await mgr.swap({
     params,
     prevPoolTxHex: state.issue.txHex,
+    // 储备 FT 前序交易：第一代池 = 各 token 预锁交易（SDK 不做链上查询，显式传入）
+    reservePreTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },
     // 用户预存到 UserSigLock 的 FT UTXO（方向/金额由 SDK 自动判断）
     userSigLockUtxo: userA,
     // UserSigLock 合约 UTXO（1 sat 控制合约）
     userSigLockContractUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
+    // SPACE 手续费/找零输入：显式传入
+    utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: WIF })),
     userWif: WIF,
     userAddress: A1,
   })

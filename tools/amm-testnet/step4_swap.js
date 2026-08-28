@@ -144,21 +144,15 @@ async function main() {
   const mgr = new FtAmmPoolManager({ network: NETWORK, purse: WIF, feeb: 0.5, debug: true })
   const res = await mgr.swap({
     params,
-    poolUtxo,
-    poolScript,
-    reserveAUtxo: reserveA,
-    reserveBUtxo: reserveB,
-    reserveLpUtxo: reserveLp,
+    poolTxHex: state.issue.txHex,
+    // 第一代池：储备 A/B/LP 来自各自的预锁交易
+    prevPoolTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },
     direction: 1,
     userUtxo: userA,
     userSigLockUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
     userWif: WIF,
     userAddress: A1,
     amountIn,
-    amountOut,
-    newReserveA,
-    newReserveB,
-    newLpReserve,
     utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: WIF })),
     changeAddress: A1,
     feeWif: WIF,
@@ -176,14 +170,12 @@ async function main() {
   console.log('main broadcast:', JSON.stringify(br))
   await waitMempool(res.txid)
 
-  const mainTx = new mvc.Transaction(res.txHex)
-  const newPoolScriptBuf = mainTx.outputs[0].script.toBuffer()
   state.swap = {
     unlockCheckTxid: res.unlockCheckTxid,
     mainTxid: res.txid,
     txHex: res.txHex,
-    poolScript: newPoolScriptBuf.toString('hex'),
-    poolAddress: mvc.crypto.Hash.sha256ripemd160(newPoolScriptBuf).toString('hex'),
+    poolScript: res.poolScript.toString('hex'),
+    poolAddress: res.poolAddress.toString('hex'),
   }
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
   console.log('swap done')

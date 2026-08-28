@@ -65,7 +65,6 @@ async function main() {
   const res = await mgr.issuePool({
     params,
     genesisUtxo: { txId: state.deploy.txid, outputIndex: 0, txHex: state.deploy.txHex },
-    genesisScript: Buffer.from(state.deploy.genesisScript, 'hex'),
     poolScript: Buffer.from(state.deploy.poolScript, 'hex'),
     lockedAUtxo: locked.A,
     lockedBUtxo: locked.B,

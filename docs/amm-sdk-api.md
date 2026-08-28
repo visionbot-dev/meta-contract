@@ -95,11 +95,7 @@ await manager.preLockReserve({
 const issued = await manager.issuePool({
   params,
   genesisUtxo: { txId: genesis.txid, outputIndex: 0, txHex: genesis.txHex },
-  genesisScript: genesis.genesisScript,
   poolScript: genesis.poolScript,
-  lpTotalSupply: params.lpTotalSupply,
-  feeBps: params.feeBps,
-  minReserve: params.minReserve,
   lockedAUtxo: { ... },      // 已预锁到 genesis 地址的 FT-A
   lockedBUtxo: { ... },
   lockedLpUtxo: { ... },
@@ -107,15 +103,32 @@ const issued = await manager.issuePool({
   utxos: [ ... ],
 })
 
-// 4) 交易操作前先查询/构造池状态
+// 4) 可选：业务层自行计算报价（SDK 内部也会自动计算）
 const state = getPoolStateFromCreationTx(
   { txId: issued.txid, outputIndex: 0, txHex: issued.txHex },
   params.lpTotalSupply,
   params.feeBps,
   params.minReserve
 )
-
 const quote = getSwapQuote(state, AmmSwapDirection.A_TO_B, new BN('100000'))
+
+// 首次 swap（第一代池）：poolTxHex = issue 交易；prevPoolTxHex = 各 token 预锁交易
+const swapped = await manager.swap({
+  params,
+  poolTxHex: issued.txHex,
+  prevPoolTxHex: {
+    A: preLockATxHex,
+    B: preLockBTxHex,
+    LP: preLockLpTxHex,
+  },
+  direction: AmmSwapDirection.A_TO_B,
+  userUtxo: { ... },         // tokenAddress = UserSigLock 合约地址
+  userSigLockUtxo: { ... },
+  userWif: '...',
+  userAddress: '用户地址',
+  amountIn: new BN('100000'),
+  utxos: [ ... ],
+})
 ```
 
 > ⚠️ SDK **不做链上查询**：所有 UTXO（含 `txHex`/`preTxHex`）必须由业务层通过索引器/RPC 获取后传入。
@@ -203,8 +216,7 @@ public async issuePool(params: IssuePoolParams): Promise<IssuePoolResult>
 
 | 字段 | 说明 |
 | --- | --- |
-| `genesisUtxo` | 已广播的 PoolGenesis UTXO（`txId/outputIndex/txHex`） |
-| `genesisScript` | `deployGenesis` 返回的 `genesisScript` |
+| `genesisUtxo` | 已广播的 PoolGenesis UTXO（`txId/outputIndex/txHex`）；`genesisScript` 自动从该交易输出解析 |
 | `poolScript` | `deployGenesis` 返回的 `poolScript` |
 | `lockedAUtxo/lockedBUtxo/lockedLpUtxo` | 预锁到 genesis 地址的 FT-A/B/LP UTXO（必须带 `txHex`/`preTxHex`） |
 | `userAddress` | 创建者地址；LP 输出发往此地址 |
@@ -226,22 +238,19 @@ public async issuePool(params: IssuePoolParams): Promise<IssuePoolResult>
 public async swap(params: AmmSwapParams): Promise<AmmOpResult>
 ```
 
-参数：
+SDK 自动从 `poolTxHex` 解析当前池（输出 0）与储备（输出 1/2/3），并自动计算 `amountOut/newReserveA/newReserveB/newLpReserve`。
 
 | 字段 | 说明 |
 | --- | --- |
 | `params` | 池参数（与 issue 相同） |
-| `poolUtxo` | 当前池 UTXO；`txHex` = 创建该池输出的交易 |
-| `poolScript` | 当前池锁定脚本（Buffer） |
-| `prevPoolTxHex` | **可选**；当前池不是 genesis 直接产出时必填（旧池交易 hex，Backtrace 证明用） |
-| `reserveAUtxo/reserveBUtxo/reserveLpUtxo` | 池地址上的储备 FT/LP UTXO（同池创建 tx 的输出 1/2/3） |
+| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） |
+| `prevPoolTxHex` | 储备 FT 前序交易 hex：第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易，同时用于 Backtrace） |
 | `direction` | `AmmSwapDirection.A_TO_B` 或 `B_TO_A` |
 | `userUtxo` | 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | UserSigLock 合约 UTXO（预存 FT 的控制合约，用户签名解锁） |
 | `userWif` | 用户私钥 WIF（解锁 UserSigLock） |
 | `userAddress` | 用户收款地址（输出发往此地址） |
-| `amountIn/amountOut` | 报价结果 |
-| `newReserveA/newReserveB/newLpReserve` | 报价结果中的新储备 |
+| `amountIn` | 输入金额（SDK 自动计算输出） |
 
 返回 `AmmOpResult`：
 
@@ -249,13 +258,7 @@ public async swap(params: AmmSwapParams): Promise<AmmOpResult>
 | --- | --- |
 | `unlockCheckTxid/unlockCheckTxHex` | amountCheck 交易，**必须先广播** |
 | `txid/txHex` | 主交易 |
-
-> ⚠️ `AmmOpResult` 不含新池脚本/地址。主交易 `txHex` 的输出 0 即新池脚本：
-> ```ts
-> const tx = new mvc.Transaction(res.txHex)
-> const newPoolScript = tx.outputs[0].script.toBuffer()
-> const newPoolAddress = mvc.crypto.Hash.sha256ripemd160(newPoolScript)
-> ```
+| `poolScript/poolAddress` | 新池脚本与地址（主交易输出 0） |
 
 ---
 
@@ -265,15 +268,17 @@ public async swap(params: AmmSwapParams): Promise<AmmOpResult>
 public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult>
 ```
 
-参数与 `swap` 类似：
+同样自动从 `poolTxHex` 解析池/储备，并自动计算 `lpMint/newReserve*`。
 
 | 字段 | 说明 |
 | --- | --- |
+| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex |
+| `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
 | `userAUtxo/userBUtxo` | 用户注入的 FT-A/FT-B，**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | 用户预存锁 UTXO |
-| `amountAIn/amountBIn` | 注入金额 |
-| `lpMint` | 报价得到的 LP 铸造量 |
-| `newReserveA/newReserveB/newLpReserve` | 新储备 |
+| `userWif` | 用户私钥 WIF |
+| `userAddress` | 用户收款地址 |
+| `amountAIn/amountBIn` | 注入金额（SDK 自动计算 LP 铸造量） |
 
 ---
 
@@ -283,15 +288,17 @@ public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult>
 public async removeLiquidity(params: AmmRemoveLiquidityParams): Promise<AmmOpResult>
 ```
 
-参数：
+同样自动从 `poolTxHex` 解析池/储备，并自动计算 `outA/outB/newReserve*`。
 
 | 字段 | 说明 |
 | --- | --- |
+| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex |
+| `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
 | `userLpUtxo` | 用户持有的 LP，**tokenAddress 必须 = UserSigLock 合约地址** |
 | `userSigLockUtxo` | 用户预存锁 UTXO |
-| `lpReturn` | 赎回的 LP 数量 |
-| `outA/outB` | 报价得到的赎回金额 |
-| `newReserveA/newReserveB/newLpReserve` | 新储备 |
+| `userWif` | 用户私钥 WIF |
+| `userAddress` | 用户收款地址 |
+| `lpReturn` | 赎回的 LP 数量（SDK 自动计算赎回金额） |
 
 ---
 
@@ -507,11 +514,11 @@ type Mcp02Options = {
 
 ## 注意事项与常见错误
 
-1. **SDK 不做链上查询**：所有 UTXO 必须带 `txHex`（FT 还需 `preTxHex`），由业务层从索引器/RPC 获取。
+1. **SDK 不做链上查询**：所有 UTXO 必须带 `txHex`（FT 还需 `preTxHex`），由业务层从索引器/RPC 获取。池/储备相关交易只需传 `poolTxHex`/`prevPoolTxHex`，SDK 自动解析。
 2. **UserSigLock 防截胡**：用户 FT/LP 必须先预存到 UserSigLock 合约地址，`userUtxo.tokenAddress` 必须等于该合约地址。预存与主交易分离时，即使预存成功而主交易失败，第三方也无法花走（需要用户签名）。
-3. **`prevPoolTxHex`**：当操作的是**非 genesis 直接产出**的池（例如第二次 swap、swap 后 remove），必须传 `prevPoolTxHex`（产生旧池 UTXO 的那笔交易 raw hex），否则 Backtrace 证明缺失会链上 `OP_EQUALVERIFY` 失败。
+3. **`prevPoolTxHex`**：储备 FT 前序交易 hex。第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易），缺失会导致储备 FT 预处理失败或 Backtrace 链上 `OP_EQUALVERIFY` 失败。
 4. **两笔交易广播顺序**：`swap/addLiquidity/removeLiquidity` 返回的 `unlockCheckTxHex`（amountCheck）必须先广播，再广播 `txHex`（主交易）。
-5. **新池地址解析**：`AmmOpResult` 不返回新池脚本，需从主交易 `txHex` 输出 0 解析。
+5. **新池脚本/地址**：`AmmOpResult` 已直接返回 `poolScript`/`poolAddress`（主交易输出 0），无需再从 `txHex` 解析。
 6. **签名姿势**：合约解锁时 `getPreimage` 使用 `subScript(0)`，`signTx` 使用**完整锁定脚本**；两者混用会导致 `OP_CHECKSIG`/`OP_CHECKSIGVERIFY` 失败。
 7. **调试**：`debug: true` 时 SDK 会对每个合约输入做本地 scrypt 验证，链上失败前先本地暴露错误。
-8. **金额单位**：AMM 公式中 LP 为整数份额，所有除法向下取整；业务层必须先调用报价函数得到一致数值再组装交易。
+8. **金额单位**：AMM 公式中 LP 为整数份额，所有除法向下取整；`swap/addLiquidity/removeLiquidity` 内部自动计算报价，业务层也可调用报价函数预览。

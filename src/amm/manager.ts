@@ -18,7 +18,7 @@ import { FtAmmPoolFactory, FT_AMM_POOL_OP } from './contract-factory/ftAmmPool'
 import { FtAmmPoolGenesisFactory } from './contract-factory/ftAmmPoolGenesis'
 import { UserSigLockFactory } from './contract-factory/userSigLock'
 import { buildPoolLockingScript, AmmPoolParams, AmmPoolData } from './builder'
-import { getCreatePoolQuote } from './math'
+import { getAddLiquidityQuote, getCreatePoolQuote, getRemoveLiquidityQuote, getSwapQuote } from './math'
 import { AmmSwapDirection } from './types'
 
 const { TxInputProof, TxOutputProof } = buildTypeClasses(require('../mcp02/contract-desc/txUtil_desc.json'))
@@ -47,11 +47,7 @@ export type PreLockReserveParams = {
 export type IssuePoolParams = {
   params: AmmPoolParams
   genesisUtxo: { txId: string; outputIndex: number; txHex: string }
-  genesisScript: Buffer
   poolScript: Buffer
-  lpTotalSupply: BN
-  feeBps: number
-  minReserve: BN
   lockedAUtxo: ParamFtUtxo
   lockedBUtxo: ParamFtUtxo
   lockedLpUtxo: ParamFtUtxo
@@ -75,26 +71,22 @@ export type IssuePoolResult = {
 
 export type AmmSwapParams = {
   params: AmmPoolParams
-  /** 当前池 UTXO（txHex = 创建该池输出的交易，即上一笔操作/issue 交易） */
-  poolUtxo: { txId: string; outputIndex: number; txHex: string }
-  poolScript: Buffer
-  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
-  prevPoolTxHex?: string
-  reserveAUtxo: ParamFtUtxo
-  reserveBUtxo: ParamFtUtxo
-  reserveLpUtxo: ParamFtUtxo
+  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
+  poolTxHex: string
+  /**
+   * 储备 FT 前序交易 hex：
+   * - 第一代池（issue 后）：各 token 预锁交易 hex（可传 { A, B, LP }）
+   * - 非第一代池：旧池创建交易 hex（单 string，同时用于 Backtrace 证明）
+   */
+  prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
   direction: AmmSwapDirection
-  /** 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），tokenAddress = userAddress */
+  /** 用户输入 FT（A→B 传 FT-A；B→A 传 FT-B），tokenAddress = UserSigLock 合约地址 */
   userUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
   userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   userWif: string
   userAddress: string | mvc.Address
   amountIn: BN
-  amountOut: BN
-  newReserveA: BN
-  newReserveB: BN
-  newLpReserve: BN
   utxos?: any[]
   changeAddress?: string | mvc.Address
   feeWif?: string
@@ -106,17 +98,17 @@ export type AmmOpResult = {
   /** amountCheck 交易（必须先广播） */
   unlockCheckTxid: string
   unlockCheckTxHex: string
+  /** 新池锁定脚本与地址（主交易输出 0） */
+  poolScript: Buffer
+  poolAddress: Buffer
 }
 
 export type AmmAddLiquidityParams = {
   params: AmmPoolParams
-  poolUtxo: { txId: string; outputIndex: number; txHex: string }
-  poolScript: Buffer
-  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
-  prevPoolTxHex?: string
-  reserveAUtxo: ParamFtUtxo
-  reserveBUtxo: ParamFtUtxo
-  reserveLpUtxo: ParamFtUtxo
+  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
+  poolTxHex: string
+  /** 储备 FT 前序交易 hex（第一代池=各 token 预锁交易，可传 { A, B, LP }；非第一代=旧池创建交易，同时用于 Backtrace） */
+  prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
   userAUtxo: ParamFtUtxo
   userBUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
@@ -125,10 +117,6 @@ export type AmmAddLiquidityParams = {
   userAddress: string | mvc.Address
   amountAIn: BN
   amountBIn: BN
-  lpMint: BN
-  newReserveA: BN
-  newReserveB: BN
-  newLpReserve: BN
   utxos?: any[]
   changeAddress?: string | mvc.Address
   feeWif?: string
@@ -136,24 +124,16 @@ export type AmmAddLiquidityParams = {
 
 export type AmmRemoveLiquidityParams = {
   params: AmmPoolParams
-  poolUtxo: { txId: string; outputIndex: number; txHex: string }
-  poolScript: Buffer
-  /** 旧池交易 hex（仅当当前池不是 genesis 直接产出时需要；用于 Backtrace 证明旧池 UTXO） */
-  prevPoolTxHex?: string
-  reserveAUtxo: ParamFtUtxo
-  reserveBUtxo: ParamFtUtxo
-  reserveLpUtxo: ParamFtUtxo
+  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
+  poolTxHex: string
+  /** 储备 FT 前序交易 hex（第一代池=各 token 预锁交易，可传 { A, B, LP }；非第一代=旧池创建交易，同时用于 Backtrace） */
+  prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
   userLpUtxo: ParamFtUtxo
   /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
   userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
   userWif: string
   userAddress: string | mvc.Address
   lpReturn: BN
-  outA: BN
-  outB: BN
-  newReserveA: BN
-  newReserveB: BN
-  newLpReserve: BN
   utxos?: any[]
   changeAddress?: string | mvc.Address
   feeWif?: string
@@ -286,7 +266,6 @@ export class FtAmmPoolManager extends FtManager {
     const {
       params: poolParams,
       genesisUtxo,
-      genesisScript,
       poolScript,
       lockedAUtxo,
       lockedBUtxo,
@@ -296,6 +275,9 @@ export class FtAmmPoolManager extends FtManager {
       changeAddress,
       feeWif,
     } = params
+    // genesisScript 从 genesisUtxo 所在交易输出自动解析
+    const genesisTx = new mvc.Transaction(genesisUtxo.txHex)
+    const genesisScript = genesisTx.outputs[genesisUtxo.outputIndex].script.toBuffer()
     const utxoInfo = prepareUtxos(utxos)
     const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : utxoInfo.utxos[0].address
     const userAddrBuf =
@@ -446,7 +428,6 @@ export class FtAmmPoolManager extends FtManager {
     })
     genesisContract.setDataPart(toHex(ftProto.newDataPart(ftProto.parseDataPart(genesisScript))))
     const genesisSubScript = (genesisContract.lockingScript as any).subScript(0)
-    const genesisTx = new mvc.Transaction(genesisUtxo.txHex)
 
     const lockedInfos = [
       { ft: ftA, inputIndex: ftAInputIndex, ucInputIndex: ucAInputIndex, ucOutIndex: ucOutA, ucUtxo: ucUtxoA, contract: checkContractA, outIndex: 1 },
@@ -658,6 +639,58 @@ export class FtAmmPoolManager extends FtManager {
   }
 
   /**
+   * 从“创建当前池 UTXO 的交易”解析池信息。
+   *
+   * 固定布局：输出 0 = 池，1/2/3 = 储备 A/B/LP。
+   */
+  private _parsePoolTxHex(poolTxHex: string): {
+    poolTx: mvc.Transaction
+    poolUtxo: { txId: string; outputIndex: number; txHex: string }
+    poolScript: Buffer
+    poolAddress: Buffer
+  } {
+    const poolTx = new mvc.Transaction(poolTxHex)
+    const poolScript = poolTx.outputs[0].script.toBuffer()
+    return {
+      poolTx,
+      poolUtxo: { txId: poolTx.id, outputIndex: 0, txHex: poolTxHex },
+      poolScript,
+      poolAddress: TokenUtil.getScriptHashBuf(poolScript),
+    }
+  }
+
+  /** 从池创建交易输出 1/2/3 构造储备 FT UTXO（preTxHex 由 prevPoolTxHex 提供） */
+  private _makeReserveUtxo(poolTxHex: string, outputIndex: number, prevPoolTxHex?: string): ParamFtUtxo {
+    const poolTx = new mvc.Transaction(poolTxHex)
+    const scriptBuf = poolTx.outputs[outputIndex].script.toBuffer()
+    const data = ftProto.parseDataPart(scriptBuf)
+    const tokenAddress = mvc.Address.fromPublicKeyHash(Buffer.from(data.tokenAddress as any, 'hex'), this.network).toString()
+    return {
+      txId: poolTx.id,
+      outputIndex,
+      tokenAddress,
+      tokenAmount: data.tokenAmount.toString(),
+      txHex: poolTxHex,
+      preTxHex: prevPoolTxHex,
+    }
+  }
+
+  /** 解析储备并预处理成完美 FT（prevPoolTxHex 可为单个 string 或 { A, B, LP } 映射） */
+  private async _resolveReserves(
+    poolTxHex: string,
+    prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
+  ): Promise<{ ftA: any; ftB: any; ftLp: any }> {
+    const hexOf = (key: 'A' | 'B' | 'LP'): string | undefined =>
+      typeof prevPoolTxHex === 'string' ? prevPoolTxHex : prevPoolTxHex?.[key]
+    const [preA, preB, preLp] = await Promise.all([
+      this._pretreatAndPerfect(this._makeReserveUtxo(poolTxHex, 1, hexOf('A'))),
+      this._pretreatAndPerfect(this._makeReserveUtxo(poolTxHex, 2, hexOf('B'))),
+      this._pretreatAndPerfect(this._makeReserveUtxo(poolTxHex, 3, hexOf('LP'))),
+    ])
+    return { ftA: preA.ft, ftB: preB.ft, ftLp: preLp.ft }
+  }
+
+  /**
    * SWAP：A→B / B→A 主交易组装。
    *
    * 布局：
@@ -668,22 +701,14 @@ export class FtAmmPoolManager extends FtManager {
   public async swap(params: AmmSwapParams): Promise<AmmOpResult> {
     const {
       params: poolParams,
-      poolUtxo,
-      poolScript,
+      poolTxHex,
       prevPoolTxHex,
-      reserveAUtxo,
-      reserveBUtxo,
-      reserveLpUtxo,
       direction,
       userUtxo,
       userSigLockUtxo,
       userWif,
       userAddress,
       amountIn,
-      amountOut,
-      newReserveA,
-      newReserveB,
-      newLpReserve,
       utxos,
       changeAddress,
       feeWif,
@@ -698,19 +723,19 @@ export class FtAmmPoolManager extends FtManager {
         : userAddress
     const aToB = direction === AmmSwapDirection.A_TO_B
 
-    // 预处理所有 FT
-    const [preA, preB, preLp, preU] = await Promise.all([
-      this._pretreatAndPerfect(reserveAUtxo),
-      this._pretreatAndPerfect(reserveBUtxo),
-      this._pretreatAndPerfect(reserveLpUtxo),
-      this._pretreatAndPerfect(userUtxo),
-    ])
-    const ftA = preA.ft
-    const ftB = preB.ft
-    const ftLp = preLp.ft
-    const ftU = preU.ft
-    const poolTx = new mvc.Transaction(poolUtxo.txHex)
-    const poolAddress = TokenUtil.getScriptHashBuf(poolScript)
+    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
+    const ftU = (await this._pretreatAndPerfect(userUtxo)).ft
+    const quote = getSwapQuote(
+      { reserveA: ftA.tokenAmount, reserveB: ftB.tokenAmount, feeBps: poolParams.feeBps },
+      direction,
+      amountIn
+    )
+    const amountOut = quote.amountOut
+    const newReserveA = quote.reserveA
+    const newReserveB = quote.reserveB
+    const newLpReserve = ftLp.tokenAmount
 
     // 输出脚本（satoshis 统一 1）
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
@@ -867,11 +892,12 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputHashProof: new Bytes(''),
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
-    const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    const genesisData = ftProto.parseDataPart(poolScript).sensibleID
+    const isGenesisPool =
+      !!genesisData && poolTx.inputs[0].prevTxId.toString('hex') === genesisData.txid && poolTx.inputs[0].outputIndex === genesisData.index
     if (!isGenesisPool) {
-      if (!prevPoolTxHex) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      if (typeof prevPoolTxHex !== 'string') {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex (single tx hex) is required for Backtrace proof.')
       }
       const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
       const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
@@ -1101,23 +1127,22 @@ export class FtAmmPoolManager extends FtManager {
     }
     checkFeeRate(txComposer, this.feeb)
 
+    const newPoolScript = txComposer.getTx().outputs[0].script.toBuffer()
     return {
       txid: txComposer.getTxId(),
       txHex: txComposer.getRawHex(),
       unlockCheckTxid: ucTxComposer.getTxId(),
       unlockCheckTxHex: ucTxComposer.getRawHex(),
+      poolScript: newPoolScript,
+      poolAddress: TokenUtil.getScriptHashBuf(newPoolScript),
     }
   }
 
   public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult> {
     const {
       params: poolParams,
-      poolUtxo,
-      poolScript,
+      poolTxHex,
       prevPoolTxHex,
-      reserveAUtxo,
-      reserveBUtxo,
-      reserveLpUtxo,
       userAUtxo,
       userBUtxo,
       userSigLockUtxo,
@@ -1125,10 +1150,6 @@ export class FtAmmPoolManager extends FtManager {
       userAddress,
       amountAIn,
       amountBIn,
-      lpMint,
-      newReserveA,
-      newReserveB,
-      newLpReserve,
       utxos,
       changeAddress,
       feeWif,
@@ -1142,20 +1163,29 @@ export class FtAmmPoolManager extends FtManager {
         ? userAddress.hashBuffer
         : userAddress
 
-    const [preA, preB, preLp, preUa, preUb] = await Promise.all([
-      this._pretreatAndPerfect(reserveAUtxo),
-      this._pretreatAndPerfect(reserveBUtxo),
-      this._pretreatAndPerfect(reserveLpUtxo),
+    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
+    const [preUa, preUb] = await Promise.all([
       this._pretreatAndPerfect(userAUtxo),
       this._pretreatAndPerfect(userBUtxo),
     ])
-    const ftA = preA.ft
-    const ftB = preB.ft
-    const ftLp = preLp.ft
     const ftUa = preUa.ft
     const ftUb = preUb.ft
-    const poolTx = new mvc.Transaction(poolUtxo.txHex)
-    const poolAddress = TokenUtil.getScriptHashBuf(poolScript)
+    const quote = getAddLiquidityQuote(
+      {
+        reserveA: ftA.tokenAmount,
+        reserveB: ftB.tokenAmount,
+        lpReserve: ftLp.tokenAmount,
+        lpTotalSupply: poolParams.lpTotalSupply,
+      },
+      amountAIn,
+      amountBIn
+    )
+    const lpMint = quote.lpMint
+    const newReserveA = quote.reserveA
+    const newReserveB = quote.reserveB
+    const newLpReserve = quote.lpReserve
 
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
     const reserveBScriptOut = ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), poolAddress, newReserveB)
@@ -1283,11 +1313,12 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputHashProof: new Bytes(''),
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
-    const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    const genesisData = ftProto.parseDataPart(poolScript).sensibleID
+    const isGenesisPool =
+      !!genesisData && poolTx.inputs[0].prevTxId.toString('hex') === genesisData.txid && poolTx.inputs[0].outputIndex === genesisData.index
     if (!isGenesisPool) {
-      if (!prevPoolTxHex) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      if (typeof prevPoolTxHex !== 'string') {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex (single tx hex) is required for Backtrace proof.')
       }
       const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
       const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
@@ -1494,33 +1525,27 @@ export class FtAmmPoolManager extends FtManager {
     }
     checkFeeRate(txComposer, this.feeb)
 
+    const newPoolScript = txComposer.getTx().outputs[0].script.toBuffer()
     return {
       txid: txComposer.getTxId(),
       txHex: txComposer.getRawHex(),
       unlockCheckTxid: ucTxComposer.getTxId(),
       unlockCheckTxHex: ucTxComposer.getRawHex(),
+      poolScript: newPoolScript,
+      poolAddress: TokenUtil.getScriptHashBuf(newPoolScript),
     }
   }
 
   public async removeLiquidity(params: AmmRemoveLiquidityParams): Promise<AmmOpResult> {
     const {
       params: poolParams,
-      poolUtxo,
-      poolScript,
+      poolTxHex,
       prevPoolTxHex,
-      reserveAUtxo,
-      reserveBUtxo,
-      reserveLpUtxo,
       userLpUtxo,
       userSigLockUtxo,
       userWif,
       userAddress,
       lpReturn,
-      outA,
-      outB,
-      newReserveA,
-      newReserveB,
-      newLpReserve,
       utxos,
       changeAddress,
       feeWif,
@@ -1534,18 +1559,24 @@ export class FtAmmPoolManager extends FtManager {
         ? userAddress.hashBuffer
         : userAddress
 
-    const [preA, preB, preLp, preU] = await Promise.all([
-      this._pretreatAndPerfect(reserveAUtxo),
-      this._pretreatAndPerfect(reserveBUtxo),
-      this._pretreatAndPerfect(reserveLpUtxo),
-      this._pretreatAndPerfect(userLpUtxo),
-    ])
-    const ftA = preA.ft
-    const ftB = preB.ft
-    const ftLp = preLp.ft
-    const ftU = preU.ft
-    const poolTx = new mvc.Transaction(poolUtxo.txHex)
-    const poolAddress = TokenUtil.getScriptHashBuf(poolScript)
+    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
+    const ftU = (await this._pretreatAndPerfect(userLpUtxo)).ft
+    const quote = getRemoveLiquidityQuote(
+      {
+        reserveA: ftA.tokenAmount,
+        reserveB: ftB.tokenAmount,
+        lpReserve: ftLp.tokenAmount,
+        lpTotalSupply: poolParams.lpTotalSupply,
+      },
+      lpReturn
+    )
+    const outA = quote.outA
+    const outB = quote.outB
+    const newReserveA = quote.reserveA
+    const newReserveB = quote.reserveB
+    const newLpReserve = quote.lpReserve
 
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
     const reserveBScriptOut = ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), poolAddress, newReserveB)
@@ -1679,11 +1710,12 @@ export class FtAmmPoolManager extends FtManager {
       prevPoolTxOutputHashProof: new Bytes(''),
       prevPoolTxOutputSatoshiBytes: new Bytes(''),
     }
-    const genesisTxid = ftProto.parseDataPart(poolScript).sensibleID?.txid || ''
-    const isGenesisPool = poolUtxo.txId === genesisTxid && poolUtxo.outputIndex === 0
+    const genesisData = ftProto.parseDataPart(poolScript).sensibleID
+    const isGenesisPool =
+      !!genesisData && poolTx.inputs[0].prevTxId.toString('hex') === genesisData.txid && poolTx.inputs[0].outputIndex === genesisData.index
     if (!isGenesisPool) {
-      if (!prevPoolTxHex) {
-        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex is required for Backtrace proof.')
+      if (typeof prevPoolTxHex !== 'string') {
+        throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM: current pool is not genesis output, prevPoolTxHex (single tx hex) is required for Backtrace proof.')
       }
       const prevPoolTx = new mvc.Transaction(prevPoolTxHex)
       const prevPoolProof = TokenUtil.getTxOutputProof(prevPoolTx, poolTx.inputs[0].outputIndex)
@@ -1891,11 +1923,14 @@ export class FtAmmPoolManager extends FtManager {
     }
     checkFeeRate(txComposer, this.feeb)
 
+    const newPoolScript = txComposer.getTx().outputs[0].script.toBuffer()
     return {
       txid: txComposer.getTxId(),
       txHex: txComposer.getRawHex(),
       unlockCheckTxid: ucTxComposer.getTxId(),
       unlockCheckTxHex: ucTxComposer.getRawHex(),
+      poolScript: newPoolScript,
+      poolAddress: TokenUtil.getScriptHashBuf(newPoolScript),
     }
   }
 }

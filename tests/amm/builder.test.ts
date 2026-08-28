@@ -8,6 +8,7 @@ import {
   buildCreatePoolScripts,
   buildPoolLockingScript,
   buildSwapOutputScripts,
+  parsePoolParamsFromScript,
 } from '../../src/amm/builder'
 import { AmmSwapDirection } from '../../src/amm/types'
 
@@ -88,5 +89,20 @@ describe('AMM builder', () => {
     expect(ftProto.getTokenAddress(result.userScript)).to.equal(USER_ADDRESS)
     expect(ftProto.getTokenAmount(result.newReserveAScript).toString()).to.equal('1100')
     expect(ftProto.getTokenAmount(result.newReserveBScript).toString()).to.equal('910')
+  })
+
+  it('parses pool params back from locking script', () => {
+    const script = buildPoolLockingScript(dummyParams(), dummyData())
+    const parsed = parsePoolParamsFromScript(script)
+
+    expect(parsed.tokenACodeHash).to.equal('11'.repeat(20))
+    expect(parsed.tokenAID).to.equal('22'.repeat(20))
+    expect(parsed.tokenBCodeHash).to.equal('33'.repeat(20))
+    expect(parsed.tokenBID).to.equal('44'.repeat(20))
+    expect(parsed.lpTokenCodeHash).to.equal('55'.repeat(20))
+    expect(parsed.lpTokenID).to.equal('66'.repeat(20))
+    expect(parsed.lpTotalSupply.toString()).to.equal('1000')
+    expect(parsed.minReserve.toString()).to.equal('1')
+    expect(parsed.feeBps).to.equal(30)
   })
 })

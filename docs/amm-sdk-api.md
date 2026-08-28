@@ -117,8 +117,8 @@ const quote = getSwapQuote(state, AmmSwapDirection.A_TO_B, new BN('100000'))
 // reservePreTxHex = 储备 FT 前序交易（第一代池 = 各 token 预锁交易；非第一代 = 旧池创建交易）
 // userSigLockUtxo = 预存到 UserSigLock 的 FT UTXO；SDK 自动判断方向、金额=FT 余额
 // utxos = SPACE 手续费/找零输入（显式传入）
+// 池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从 prevPoolTxHex 池脚本自动解析
 const swapped = await manager.swap({
-  params,
   prevPoolTxHex: issued.txHex,
   reservePreTxHex: { A: preLockATxHex, B: preLockBTxHex, LP: preLockLpTxHex },
   userSigLockUtxo: { ... },                  // 预存 FT（tokenAddress = UserSigLock 地址）
@@ -261,8 +261,7 @@ SDK 自动从 `prevPoolTxHex` 解析当前池（输出 0）与储备（输出 1/
 
 | 字段 | 说明 |
 | --- | --- |
-| `params` | 池参数（与 issue 相同） |
-| `prevPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） |
+| `prevPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。池构造参数（token codehash/ID、LP 总量、费率）由 SDK 从输出 0 脚本自动解析 |
 | `reservePreTxHex` | **必填**；储备 FT 前序交易 hex（SDK 不做链上查询）：第一代池传 `{ A, B, LP }`（各 token 预锁交易）；非第一代池传单个 string（旧池创建交易，同时用于 Backtrace） |
 | `userSigLockUtxo` | **必填**；用户预存到 UserSigLock 的 FT UTXO（tokenAddress = UserSigLock 合约地址）。SDK 根据该 FT 是 A/B 自动决定 swap 方向，金额 = 该 FT 余额 |
 | `userSigLockContractUtxo` | **必填**；UserSigLock 合约 UTXO（1 sat 控制合约，用户签名解锁）。若预存 FT 所在交易同时创建了合约输出，可省略 |

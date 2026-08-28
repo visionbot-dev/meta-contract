@@ -148,7 +148,6 @@ async function main() {
     debug: true,
   })
   const res = await mgr.swap({
-    params,
     prevPoolTxHex: state.issue.txHex,
     // 储备 FT 前序交易：第一代池 = 各 token 预锁交易（SDK 不做链上查询，显式传入）
     reservePreTxHex: { A: state.locked.A.txHex, B: state.locked.B.txHex, LP: state.locked.LP.txHex },

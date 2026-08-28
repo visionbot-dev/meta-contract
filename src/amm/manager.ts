@@ -17,7 +17,7 @@ import { FtManager, Mcp02Options, ParamFtUtxo } from '../mcp02'
 import { FtAmmPoolFactory, FT_AMM_POOL_OP } from './contract-factory/ftAmmPool'
 import { FtAmmPoolGenesisFactory } from './contract-factory/ftAmmPoolGenesis'
 import { UserSigLock, UserSigLockFactory } from './contract-factory/userSigLock'
-import { buildPoolLockingScript, AmmPoolParams, AmmPoolData } from './builder'
+import { buildPoolLockingScript, parsePoolParamsFromScript, AmmPoolParams, AmmPoolData } from './builder'
 import { getAddLiquidityQuote, getCreatePoolQuote, getRemoveLiquidityQuote, getSwapQuote } from './math'
 import { AmmSwapDirection } from './types'
 
@@ -70,11 +70,9 @@ export type IssuePoolResult = {
 }
 
 export type AmmSwapParams = {
-  /** 池静态参数（token codehash/ID、LP 总量、费率等；无法从链上脚本反序列化，需传入） */
-  params: AmmPoolParams
   /**
    * 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。
-   * SDK 自动从该交易解析池/储备，并复制旧脚本修改 data part 构造新输出。
+   * SDK 自动从该交易解析池/储备（含池构造参数），并复制旧脚本修改 data part 构造新输出。
    */
   prevPoolTxHex: string
   /**
@@ -865,7 +863,6 @@ export class FtAmmPoolManager extends FtManager {
    */
   public async swap(params: AmmSwapParams): Promise<AmmOpResult> {
     const {
-      params: poolParams,
       prevPoolTxHex,
       reservePreTxHex,
       userSigLockUtxo: userSigLockFtUtxo,
@@ -881,8 +878,9 @@ export class FtAmmPoolManager extends FtManager {
     // SPACE 手续费/找零输入：业务层显式传入
     const utxoInfo = prepareUtxos(utxos)
 
-    // 从 prevPoolTxHex（创建当前池 UTXO 的交易）自动解析池与储备
+    // 从 prevPoolTxHex（创建当前池 UTXO 的交易）自动解析池、储备与池构造参数
     const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(prevPoolTxHex)
+    const poolParams = parsePoolParamsFromScript(poolScript)
     const { ftA, ftB, ftLp } = await this._resolveReserves(prevPoolTxHex, reservePreTxHex)
     const ftU = (await this._pretreatAndPerfect(userSigLockFtUtxo)).ft
     const userUtxo = userSigLockFtUtxo

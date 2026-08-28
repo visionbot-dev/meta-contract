@@ -62,6 +62,66 @@ export function buildPoolLockingScript(params: AmmPoolParams, data: AmmPoolData)
   return contract.lockingScript.toBuffer()
 }
 
+/** 从 sCrypt 脚本 chunk 解析 int（小端 pushdata，或 OP_0/OP_1..OP_16/OP_1NEGATE） */
+function parseScriptInt(chunk: { opcodenum: number; buf?: Buffer }): BN {
+  if (chunk.opcodenum === 0) return new BN(0) // OP_0
+  if (chunk.opcodenum === 0x4f) return new BN(-1) // OP_1NEGATE
+  if (chunk.opcodenum >= 0x51 && chunk.opcodenum <= 0x60) return new BN(chunk.opcodenum - 0x50) // OP_1..OP_16
+  if (chunk.buf && chunk.buf.length > 0) {
+    const le = Buffer.from(chunk.buf).reverse()
+    return new BN(le.toString('hex'), 16)
+  }
+  throw new Error('AMM: cannot parse int from script chunk')
+}
+
+/**
+ * 从池锁定脚本解析构造参数。
+ *
+ * sCrypt 将 6 个 bytes20 参数连续 push 在 code part 中，随后是 3 个 int
+ * （lpTotalSupply / minReserve / feeBps）。SDK 用该函数从 prevPoolTxHex
+ * 的池脚本直接还原 AmmPoolParams，业务层无需再传 params。
+ */
+export function parsePoolParamsFromScript(script: Buffer | mvc.Script): AmmPoolParams {
+  const s = Buffer.isBuffer(script) ? mvc.Script.fromBuffer(script) : script
+  const chunks = s.chunks as { opcodenum: number; buf?: Buffer }[]
+
+  let start = -1
+  for (let i = 0; i + 5 < chunks.length; i++) {
+    const six = chunks.slice(i, i + 6)
+    if (six.every((c) => c.opcodenum === 20 && c.buf && c.buf.length === 20)) {
+      start = i
+      break
+    }
+  }
+  if (start < 0) {
+    throw new Error('AMM: cannot parse pool params from script (6x20-byte params not found)')
+  }
+  const hexAt = (i: number) => chunks[start + i].buf!.toString('hex')
+
+  const ints: BN[] = []
+  for (let j = start + 6; j < chunks.length && ints.length < 3; j++) {
+    const c = chunks[j]
+    if (c.opcodenum === 0x00 || (c.opcodenum >= 0x4f && c.opcodenum <= 0x60) || (c.opcodenum >= 1 && c.opcodenum <= 78 && c.buf)) {
+      ints.push(parseScriptInt(c))
+    }
+  }
+  if (ints.length < 3) {
+    throw new Error('AMM: cannot parse pool int params from script')
+  }
+
+  return {
+    tokenACodeHash: hexAt(0),
+    tokenAID: hexAt(1),
+    tokenBCodeHash: hexAt(2),
+    tokenBID: hexAt(3),
+    lpTokenCodeHash: hexAt(4),
+    lpTokenID: hexAt(5),
+    lpTotalSupply: ints[0],
+    minReserve: ints[1],
+    feeBps: Number(ints[2].toString()),
+  }
+}
+
 function addressBuf(address: string | mvc.Address | Buffer, network?: string): Buffer {
   if (Buffer.isBuffer(address)) return address
   if (address instanceof mvc.Address) return address.hashBuffer

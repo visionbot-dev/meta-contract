@@ -145,25 +145,16 @@ async function main() {
   const newReserveB = state2.reserveB.sub(amountBOut)
   const newLpReserve = state2.lpReserve.add(lpReturn)
 
-  const params = {
-    ...state.params,
-    lpTotalSupply: new BN(state.params.lpTotalSupply, 16),
-    minReserve: new BN(state.params.minReserve, 16),
-  }
   const mgr = new FtAmmPoolManager({ network: NETWORK, purse: WIF, feeb: 0.5, debug: true })
   const res = await mgr.removeLiquidity({
-    params,
-    poolTxHex: state.swap.txHex,
+    currentPoolTxHex: state.swap.txHex,
     // 非第一代池：储备 FT 前序交易 = 旧池创建交易（issue 交易），同时用于 Backtrace
     prevPoolTxHex: state.issue.txHex,
     userLpUtxo: lpUser,
-    userSigLockUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
+    userSigLockContractUtxo: { txId: usl.txId, outputIndex: usl.outputIndex, satoshis: usl.satoshis, txHex: usl.txHex },
     userWif: WIF,
     userAddress: A1,
-    lpReturn,
     utxos: (await getUnspentUtxos(A1)).map((u) => ({ ...u, wif: WIF })),
-    changeAddress: A1,
-    feeWif: WIF,
   })
   console.log('remove unlockCheck txid:', res.unlockCheckTxid)
   console.log('remove main txid:', res.txid)

@@ -285,17 +285,18 @@ SDK 自动从 `currentPoolTxHex` 解析当前池（输出 0）与储备（输出
 public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult>
 ```
 
-同样自动从 `poolTxHex` 解析池/储备，并自动计算 `lpMint/newReserve*`。
+同样自动从 `currentPoolTxHex` 解析池/储备（含池参数），根据预存 FT 余额自动计算 `lpMint/newReserve*`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex |
-| `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
-| `userAUtxo/userBUtxo` | 用户注入的 FT-A/FT-B，**tokenAddress 必须 = UserSigLock 合约地址** |
-| `userSigLockUtxo` | 用户预存锁 UTXO |
+| `currentPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0=池，1/2/3=储备） |
+| `prevPoolTxHex` | **必填**；储备 FT 前序交易（第一代池 `{ A, B, LP }`；非第一代单 string，同时用于 Backtrace） |
+| `userAUtxo` | **必填**；预存到 UserSigLock 的 FT-A UTXO（tokenAddress = UserSigLock 地址），金额 = 该 FT 余额 |
+| `userBUtxo` | **必填**；预存到 UserSigLock 的 FT-B UTXO（tokenAddress = UserSigLock 地址），金额 = 该 FT 余额 |
+| `userSigLockContractUtxo` | **必填**；UserSigLock 合约 UTXO（若预存交易同时创建合约输出可省略） |
+| `utxos` | **必填**；SPACE 手续费/找零输入（显式传入） |
 | `userWif` | **可选**；不传时使用 Metalet signer |
 | `userAddress` | **可选**；不传时使用 signer/purse 地址 |
-| `amountAIn/amountBIn` | 注入金额（SDK 自动计算 LP 铸造量） |
 
 ---
 
@@ -305,17 +306,17 @@ public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult>
 public async removeLiquidity(params: AmmRemoveLiquidityParams): Promise<AmmOpResult>
 ```
 
-同样自动从 `poolTxHex` 解析池/储备，并自动计算 `outA/outB/newReserve*`。
+同样自动从 `currentPoolTxHex` 解析池/储备（含池参数），根据预存 LP 余额自动计算 `outA/outB/newReserve*`。
 
 | 字段 | 说明 |
 | --- | --- |
-| `poolTxHex` | **必填**；创建当前池 UTXO 的交易 hex |
-| `prevPoolTxHex` | 同上（第一代池 `{ A, B, LP }`；非第一代单 string） |
-| `userLpUtxo` | 用户持有的 LP，**tokenAddress 必须 = UserSigLock 合约地址** |
-| `userSigLockUtxo` | 用户预存锁 UTXO |
+| `currentPoolTxHex` | **必填**；创建当前池 UTXO 的交易 hex（输出 0=池，1/2/3=储备） |
+| `prevPoolTxHex` | **必填**；储备 FT 前序交易（第一代池 `{ A, B, LP }`；非第一代单 string，同时用于 Backtrace） |
+| `userLpUtxo` | **必填**；预存到 UserSigLock 的 LP UTXO（tokenAddress = UserSigLock 地址），金额 = 该 LP 余额 |
+| `userSigLockContractUtxo` | **必填**；UserSigLock 合约 UTXO（若预存交易同时创建合约输出可省略） |
+| `utxos` | **必填**；SPACE 手续费/找零输入（显式传入） |
 | `userWif` | **可选**；不传时使用 Metalet signer |
 | `userAddress` | **可选**；不传时使用 signer/purse 地址 |
-| `lpReturn` | 赎回的 LP 数量（SDK 自动计算赎回金额） |
 
 ---
 

@@ -111,43 +111,59 @@ export type AmmOpResult = {
 }
 
 export type AmmAddLiquidityParams = {
-  params: AmmPoolParams
-  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
-  poolTxHex: string
-  /** 储备 FT 前序交易 hex（第一代池=各 token 预锁交易，可传 { A, B, LP }；非第一代=旧池创建交易，同时用于 Backtrace） */
+  /**
+   * 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。
+   * SDK 自动解析池/储备（含池构造参数），并自动计算 LP 铸造量。
+   */
+  currentPoolTxHex: string
+  /**
+   * 储备 FT 前序交易 hex（SDK 严格不做链上查询，必须显式传入）：
+   * - 第一代池（issue 后）：各 token 预锁交易 hex（可传 { A, B, LP }）
+   * - 非第一代池：旧池创建交易 hex（单 string，同时用于 Backtrace 证明）
+   */
   prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
+  /** 用户预存到 UserSigLock 的 FT-A UTXO（tokenAddress = UserSigLock 合约地址），金额 = 该 FT 余额 */
   userAUtxo: ParamFtUtxo
+  /** 用户预存到 UserSigLock 的 FT-B UTXO（tokenAddress = UserSigLock 合约地址），金额 = 该 FT 余额 */
   userBUtxo: ParamFtUtxo
-  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
-  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+  /**
+   * UserSigLock 合约 UTXO。
+   * 若预存 FT 所在交易同时创建了 UserSigLock 合约输出，SDK 也会从 userSigLockFtUtxo.txHex 自动找到。
+   */
+  userSigLockContractUtxo?: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+  /** SPACE 手续费/找零输入（显式传入；可带 wif，Metalet 模式可不带 wif） */
+  utxos?: any[]
   /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
   userWif?: string
   /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
   userAddress?: string | mvc.Address
-  amountAIn: BN
-  amountBIn: BN
-  utxos?: any[]
-  changeAddress?: string | mvc.Address
-  feeWif?: string
 }
 
 export type AmmRemoveLiquidityParams = {
-  params: AmmPoolParams
-  /** 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP） */
-  poolTxHex: string
-  /** 储备 FT 前序交易 hex（第一代池=各 token 预锁交易，可传 { A, B, LP }；非第一代=旧池创建交易，同时用于 Backtrace） */
+  /**
+   * 创建当前池 UTXO 的交易 hex（输出 0 = 池，1/2/3 = 储备 A/B/LP）。
+   * SDK 自动解析池/储备（含池构造参数），并自动计算赎回金额。
+   */
+  currentPoolTxHex: string
+  /**
+   * 储备 FT 前序交易 hex（SDK 严格不做链上查询，必须显式传入）：
+   * - 第一代池（issue 后）：各 token 预锁交易 hex（可传 { A, B, LP }）
+   * - 非第一代池：旧池创建交易 hex（单 string，同时用于 Backtrace 证明）
+   */
   prevPoolTxHex?: string | { A?: string; B?: string; LP?: string }
+  /** 用户预存到 UserSigLock 的 LP UTXO（tokenAddress = UserSigLock 合约地址），金额 = 该 LP 余额 */
   userLpUtxo: ParamFtUtxo
-  /** 用户预存锁 UTXO（UserSigLock 合约，预存 FT 到该合约地址后由用户签名解锁，防截胡） */
-  userSigLockUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+  /**
+   * UserSigLock 合约 UTXO。
+   * 若预存 FT 所在交易同时创建了 UserSigLock 合约输出，SDK 也会从 userSigLockFtUtxo.txHex 自动找到。
+   */
+  userSigLockContractUtxo?: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+  /** SPACE 手续费/找零输入（显式传入；可带 wif，Metalet 模式可不带 wif） */
+  utxos?: any[]
   /** 用户私钥 WIF（可选；不传则使用 Metalet signer 签名 UserSigLock） */
   userWif?: string
   /** 用户收款地址（可选；不传则使用 signer/purse 地址） */
   userAddress?: string | mvc.Address
-  lpReturn: BN
-  utxos?: any[]
-  changeAddress?: string | mvc.Address
-  feeWif?: string
 }
 
 /**
@@ -1314,33 +1330,42 @@ export class FtAmmPoolManager extends FtManager {
 
   public async addLiquidity(params: AmmAddLiquidityParams): Promise<AmmOpResult> {
     const {
-      params: poolParams,
-      poolTxHex,
+      currentPoolTxHex,
       prevPoolTxHex,
       userAUtxo,
       userBUtxo,
-      userSigLockUtxo,
+      userSigLockContractUtxo,
+      utxos,
       userWif,
       userAddress,
-      amountAIn,
-      amountBIn,
-      utxos,
-      changeAddress,
-      feeWif,
     } = params
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
     const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
+    const changeAddr = mvc.Address.fromPublicKeyHash(userAddrBuf, this.network)
+    const feeWif = undefined
 
-    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
-    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
-    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
+    // 从 currentPoolTxHex 自动解析池、储备与池构造参数
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(currentPoolTxHex)
+    const poolParams = parsePoolParamsFromScript(poolScript)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(currentPoolTxHex, prevPoolTxHex)
     const [preUa, preUb] = await Promise.all([
       this._pretreatAndPerfect(userAUtxo),
       this._pretreatAndPerfect(userBUtxo),
     ])
     const ftUa = preUa.ft
     const ftUb = preUb.ft
+
+    // 校验：userAUtxo 必须是 FT-A，userBUtxo 必须是 FT-B（金额 = 各自余额）
+    const uaID = toHex(ftProto.getTokenID(ftUa.lockingScript.toBuffer()))
+    const ubID = toHex(ftProto.getTokenID(ftUb.lockingScript.toBuffer()))
+    if (!(uaID === poolParams.tokenAID && ubID === poolParams.tokenBID)) {
+      throw new CodeError(
+        ErrCode.EC_INVALID_ARGUMENT,
+        'AMM addLiquidity: userAUtxo must be tokenA and userBUtxo must be tokenB.'
+      )
+    }
+    const amountAIn = ftUa.tokenAmount
+    const amountBIn = ftUb.tokenAmount
     const quote = getAddLiquidityQuote(
       {
         reserveA: ftA.tokenAmount,
@@ -1355,6 +1380,10 @@ export class FtAmmPoolManager extends FtManager {
     const newReserveA = quote.reserveA
     const newReserveB = quote.reserveB
     const newLpReserve = quote.lpReserve
+
+    // UserSigLock 合约 UTXO：优先显式传入，否则从预存 FT 所在交易输出中自动查找
+    const userSigLockUtxo =
+      userSigLockContractUtxo || this._autoFindUserSigLockContractUtxo(userAUtxo)
 
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
     const reserveBScriptOut = ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), poolAddress, newReserveB)
@@ -1708,26 +1737,31 @@ export class FtAmmPoolManager extends FtManager {
 
   public async removeLiquidity(params: AmmRemoveLiquidityParams): Promise<AmmOpResult> {
     const {
-      params: poolParams,
-      poolTxHex,
+      currentPoolTxHex,
       prevPoolTxHex,
       userLpUtxo,
-      userSigLockUtxo,
+      userSigLockContractUtxo,
+      utxos,
       userWif,
       userAddress,
-      lpReturn,
-      utxos,
-      changeAddress,
-      feeWif,
     } = params
     const utxoInfo = prepareUtxos(utxos)
-    const changeAddr = changeAddress ? new mvc.Address(changeAddress, this.network) : new mvc.Address(utxoInfo.utxos[0].address, this.network)
     const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(userAddress, userWif)
+    const changeAddr = mvc.Address.fromPublicKeyHash(userAddrBuf, this.network)
+    const feeWif = undefined
 
-    // 从 poolTxHex 自动解析池与储备，SDK 计算报价
-    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(poolTxHex)
-    const { ftA, ftB, ftLp } = await this._resolveReserves(poolTxHex, prevPoolTxHex)
+    // 从 currentPoolTxHex 自动解析池、储备与池构造参数
+    const { poolTx, poolUtxo, poolScript, poolAddress } = this._parsePoolTxHex(currentPoolTxHex)
+    const poolParams = parsePoolParamsFromScript(poolScript)
+    const { ftA, ftB, ftLp } = await this._resolveReserves(currentPoolTxHex, prevPoolTxHex)
     const ftU = (await this._pretreatAndPerfect(userLpUtxo)).ft
+
+    // 校验：userLpUtxo 必须是 LP（金额 = 该 LP 余额）
+    const lpID = toHex(ftProto.getTokenID(ftU.lockingScript.toBuffer()))
+    if (lpID !== poolParams.lpTokenID) {
+      throw new CodeError(ErrCode.EC_INVALID_ARGUMENT, 'AMM removeLiquidity: userLpUtxo must be the pool LP token.')
+    }
+    const lpReturn = ftU.tokenAmount
     const quote = getRemoveLiquidityQuote(
       {
         reserveA: ftA.tokenAmount,
@@ -1742,6 +1776,10 @@ export class FtAmmPoolManager extends FtManager {
     const newReserveA = quote.reserveA
     const newReserveB = quote.reserveB
     const newLpReserve = quote.lpReserve
+
+    // UserSigLock 合约 UTXO：优先显式传入，否则从预存 LP 所在交易输出中自动查找
+    const userSigLockUtxo =
+      userSigLockContractUtxo || this._autoFindUserSigLockContractUtxo(userLpUtxo)
 
     const reserveAScriptOut = ftProto.getNewTokenScript(ftA.lockingScript.toBuffer(), poolAddress, newReserveA)
     const reserveBScriptOut = ftProto.getNewTokenScript(ftB.lockingScript.toBuffer(), poolAddress, newReserveB)

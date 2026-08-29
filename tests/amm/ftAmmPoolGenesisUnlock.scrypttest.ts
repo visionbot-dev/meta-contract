@@ -77,7 +77,6 @@ describe('FtAmmPoolGenesis issue (local scrypt test)', () => {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: LP_TOTAL_SUPPLY,
       minReserve: MIN_RESERVE,
       feeBps: FEE_BPS,
     })
@@ -94,7 +93,6 @@ describe('FtAmmPoolGenesis issue (local scrypt test)', () => {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: LP_TOTAL_SUPPLY,
       minReserve: MIN_RESERVE,
       feeBps: FEE_BPS,
       poolCodeHash: new Bytes(poolCodeHash),

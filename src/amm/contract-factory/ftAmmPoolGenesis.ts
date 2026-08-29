@@ -39,7 +39,6 @@ export class FtAmmPoolGenesis extends ContractAdapter {
     tokenBID: Bytes
     lpTokenCodeHash: Bytes
     lpTokenID: Bytes
-    lpTotalSupply: number
     minReserve: number
     feeBps: number
     poolCodeHash: Bytes
@@ -52,7 +51,6 @@ export class FtAmmPoolGenesis extends ContractAdapter {
     tokenBID: Bytes
     lpTokenCodeHash: Bytes
     lpTokenID: Bytes
-    lpTotalSupply: number
     minReserve: number
     feeBps: number
     poolCodeHash: Bytes
@@ -66,7 +64,6 @@ export class FtAmmPoolGenesis extends ContractAdapter {
       constuctParams.tokenBID,
       constuctParams.lpTokenCodeHash,
       constuctParams.lpTokenID,
-      constuctParams.lpTotalSupply,
       constuctParams.minReserve,
       constuctParams.feeBps,
       constuctParams.poolCodeHash
@@ -124,7 +121,6 @@ export class FtAmmPoolGenesisFactory {
     tokenBID: Bytes
     lpTokenCodeHash: Bytes
     lpTokenID: Bytes
-    lpTotalSupply: number
     minReserve: number
     feeBps: number
     poolCodeHash: Bytes
@@ -140,7 +136,6 @@ export class FtAmmPoolGenesisFactory {
       tokenBID: new Bytes('44'.repeat(20)),
       lpTokenCodeHash: new Bytes('55'.repeat(20)),
       lpTokenID: new Bytes('66'.repeat(20)),
-      lpTotalSupply: 1000000,
       minReserve: 1,
       feeBps: 30,
       poolCodeHash: new Bytes('77'.repeat(20)),

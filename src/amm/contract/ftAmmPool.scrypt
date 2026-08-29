@@ -26,7 +26,6 @@ contract FtAmmPool {
     bytes tokenBID;
     bytes lpTokenCodeHash;
     bytes lpTokenID;
-    int lpTotalSupply;
     int minReserve;
     int feeBps;
     static const int OP_SWAP = 1;
@@ -186,6 +185,9 @@ contract FtAmmPool {
         // ========== 读取池 tokenAddress（用于保证 input/output 一致） ==========
         bytes poolTokenAddress = TokenProto.getTokenAddress(poolScript, poolScriptLen);
 
+        // ========== LP 总供应量（与普通 FT 对齐：池 data part tokenAmount） ==========
+        int lpTotalSupply = TokenProto.getTokenAmount(poolScript, poolScriptLen);
+
         // ========== TokenGenesis 链式更新 ==========
         // 池必须由 PoolGenesis issue 创建，genesisTxid 恒非 NULL（= PoolGenesis outpoint）
         bytes genesisTxid = TokenProto.getGenesisTxid(poolScript, poolScriptLen);
@@ -325,7 +327,7 @@ contract FtAmmPool {
             require(mul(amountAIn, reserveB_old) == mul(amountBIn, reserveA_old));
 
             // LP 铸造量（按流通 LP 计算：S - lpReserve_old）
-            int circulatingLp = this.lpTotalSupply - lpReserve_old;
+            int circulatingLp = lpTotalSupply - lpReserve_old;
             require(circulatingLp > 0);
             int lpMintA = mul(amountAIn, circulatingLp) / reserveA_old;
             int lpMintB = mul(amountBIn, circulatingLp) / reserveB_old;
@@ -355,10 +357,10 @@ contract FtAmmPool {
             readUserLp(oldLpUserScript, lpUserProof, this.lpTokenID, this.lpTokenCodeHash, poolAddress, userAddress, userSigLockAddress, prevouts, USER_INPUT_INDEX, lpReturn);
 
             require(lpReturn > 0);
-            require(lpReturn <= this.lpTotalSupply - lpReserve_old); // 不超过流通 LP
+            require(lpReturn <= lpTotalSupply - lpReserve_old); // 不超过流通 LP
 
             // 赎回按流通 LP 计算：out = lpReturn * reserve / (S - lpReserve_old)
-            int circulatingLp = this.lpTotalSupply - lpReserve_old;
+            int circulatingLp = lpTotalSupply - lpReserve_old;
             int outA = mul(lpReturn, reserveA_old) / circulatingLp;
             int outB = mul(lpReturn, reserveB_old) / circulatingLp;
             require(outA > 0);

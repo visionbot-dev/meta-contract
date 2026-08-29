@@ -219,7 +219,6 @@ export class FtAmmPoolManager extends FtManager {
       tokenBID: new Bytes(params.tokenBID),
       lpTokenCodeHash: new Bytes(params.lpTokenCodeHash),
       lpTokenID: new Bytes(params.lpTokenID),
-      lpTotalSupply: Number(params.lpTotalSupply.toString()),
       minReserve: Number(params.minReserve.toString()),
       feeBps: params.feeBps,
       poolCodeHash: new Bytes(poolCodeHash),
@@ -231,7 +230,7 @@ export class FtAmmPoolManager extends FtManager {
           tokenSymbol: data.tokenSymbol,
           decimalNum: data.decimalNum,
           tokenAddress: data.tokenAddress,
-          tokenAmount: data.tokenAmount ?? new BN(0),
+          tokenAmount: params.lpTotalSupply, // LP 总供应量与普通 FT 对齐（data part tokenAmount）
           genesisHash: data.genesisHash ?? '00'.repeat(20),
           sensibleID: { txid: '00'.repeat(32), index: 0 }, // NULL genesis，待 issue 锚定
         })
@@ -487,7 +486,6 @@ export class FtAmmPoolManager extends FtManager {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: Number(poolParams.lpTotalSupply.toString()),
       minReserve: Number(poolParams.minReserve.toString()),
       feeBps: poolParams.feeBps,
       poolCodeHash: new Bytes(poolCodeHash),
@@ -1051,7 +1049,6 @@ export class FtAmmPoolManager extends FtManager {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: Number(poolParams.lpTotalSupply.toString()),
       minReserve: Number(poolParams.minReserve.toString()),
       feeBps: poolParams.feeBps,
     })
@@ -1480,7 +1477,6 @@ export class FtAmmPoolManager extends FtManager {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: Number(poolParams.lpTotalSupply.toString()),
       minReserve: Number(poolParams.minReserve.toString()),
       feeBps: poolParams.feeBps,
     })
@@ -1884,7 +1880,6 @@ export class FtAmmPoolManager extends FtManager {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: Number(poolParams.lpTotalSupply.toString()),
       minReserve: Number(poolParams.minReserve.toString()),
       feeBps: poolParams.feeBps,
     })

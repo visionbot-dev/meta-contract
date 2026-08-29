@@ -22,7 +22,6 @@ contract FtAmmPoolGenesis {
     bytes tokenBID;
     bytes lpTokenCodeHash;
     bytes lpTokenID;
-    int lpTotalSupply;
     int minReserve;
     int feeBps;
     // 期望的 FtAmmPool code part hash（防 issue 出非预期池代码）
@@ -103,6 +102,11 @@ contract FtAmmPoolGenesis {
              == TokenProto.getTokenAddress(genesisScript, genesisScriptLen));
         require(TokenProto.getGenesisTxid(poolScript, poolScriptLen) == ProtoHeader.NULL_GENESIS_TXID);
 
+        // LP 总供应量（与普通 FT 对齐：data part tokenAmount）
+        // genesis 先定义 LP 总量，正式池脚本必须继承相同值
+        int lpTotalSupply = TokenProto.getTokenAmount(genesisScript, genesisScriptLen);
+        require(TokenProto.getTokenAmount(poolScript, poolScriptLen) == lpTotalSupply);
+
         // 预锁储备读金额
         int inA = readLocked(lockedTokenAScript, proofA, this.tokenAID, this.tokenACodeHash, genesisAddress, prevouts, LOCKED_A_INPUT_INDEX);
         int inB = readLocked(lockedTokenBScript, proofB, this.tokenBID, this.tokenBCodeHash, genesisAddress, prevouts, LOCKED_B_INPUT_INDEX);
@@ -111,7 +115,7 @@ contract FtAmmPoolGenesis {
         require(inA >= this.minReserve);
         require(inB >= this.minReserve);
         require(lpLocked > 0);
-        require(lpLocked <= this.lpTotalSupply);
+        require(lpLocked <= lpTotalSupply);
 
         // 初始 LP（Uniswap v2）：ΔL = floor(sqrt(inA * inB))
         // 合约不实现开方，改为校验调用方传入的 lpMint 是精确整数平方根：

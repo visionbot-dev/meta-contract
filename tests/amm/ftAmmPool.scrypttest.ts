@@ -18,7 +18,6 @@ describe('FtAmmPool contract (data part / indexer compatibility)', () => {
       tokenBID: new Bytes('44'.repeat(20)),
       lpTokenCodeHash: new Bytes('55'.repeat(20)),
       lpTokenID: new Bytes('66'.repeat(20)),
-      lpTotalSupply: 1000000,
       minReserve: 1,
       feeBps: 30,
     })

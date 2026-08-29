@@ -111,7 +111,6 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
       tokenBID: new Bytes(poolParams.tokenBID),
       lpTokenCodeHash: new Bytes(poolParams.lpTokenCodeHash),
       lpTokenID: new Bytes(poolParams.lpTokenID),
-      lpTotalSupply: LP_TOTAL_SUPPLY,
       minReserve: MIN_RESERVE,
       feeBps: FEE_BPS,
     })

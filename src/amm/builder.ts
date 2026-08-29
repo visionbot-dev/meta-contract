@@ -33,6 +33,9 @@ export type AmmPoolData = {
 
 /**
  * 构造池合约锁定脚本（含标准 FT data part）
+ *
+ * lpTotalSupply 不再写入合约 code part，而是与普通 FT 对齐：
+ * 存入池 UTXO data part 的 tokenAmount（8 字节小端无符号）。
  */
 export function buildPoolLockingScript(params: AmmPoolParams, data: AmmPoolData): Buffer {
   const contract = FtAmmPoolFactory.createContract({
@@ -42,7 +45,6 @@ export function buildPoolLockingScript(params: AmmPoolParams, data: AmmPoolData)
     tokenBID: new Bytes(params.tokenBID),
     lpTokenCodeHash: new Bytes(params.lpTokenCodeHash),
     lpTokenID: new Bytes(params.lpTokenID),
-    lpTotalSupply: Number(params.lpTotalSupply.toString()),
     minReserve: Number(params.minReserve.toString()),
     feeBps: params.feeBps,
   })
@@ -53,7 +55,7 @@ export function buildPoolLockingScript(params: AmmPoolParams, data: AmmPoolData)
         tokenSymbol: data.tokenSymbol,
         decimalNum: data.decimalNum,
         tokenAddress: data.tokenAddress,
-        tokenAmount: data.tokenAmount ?? new BN(0),
+        tokenAmount: params.lpTotalSupply,
         genesisHash: data.genesisHash ?? '00'.repeat(20),
         genesisTxid: data.genesisTxid ?? '00'.repeat(32) + '_0',
       })
@@ -77,9 +79,9 @@ function parseScriptInt(chunk: { opcodenum: number; buf?: Buffer }): BN {
 /**
  * 从池锁定脚本解析构造参数。
  *
- * sCrypt 将 6 个 bytes20 参数连续 push 在 code part 中，随后是 3 个 int
- * （lpTotalSupply / minReserve / feeBps）。SDK 用该函数从 prevPoolTxHex
- * 的池脚本直接还原 AmmPoolParams，业务层无需再传 params。
+ * - 6 个 bytes20 参数（token codehash/ID）连续 push 在 code part；
+ * - minReserve / feeBps 紧随其后以 sCrypt int 编码；
+ * - lpTotalSupply 与普通 FT 对齐，从 data part 的 tokenAmount 读取。
  */
 export function parsePoolParamsFromScript(script: Buffer | mvc.Script): AmmPoolParams {
   const s = Buffer.isBuffer(script) ? mvc.Script.fromBuffer(script) : script
@@ -99,15 +101,19 @@ export function parsePoolParamsFromScript(script: Buffer | mvc.Script): AmmPoolP
   const hexAt = (i: number) => chunks[start + i].buf!.toString('hex')
 
   const ints: BN[] = []
-  for (let j = start + 6; j < chunks.length && ints.length < 3; j++) {
+  for (let j = start + 6; j < chunks.length && ints.length < 2; j++) {
     const c = chunks[j]
     if (c.opcodenum === 0x00 || (c.opcodenum >= 0x4f && c.opcodenum <= 0x60) || (c.opcodenum >= 1 && c.opcodenum <= 78 && c.buf)) {
       ints.push(parseScriptInt(c))
     }
   }
-  if (ints.length < 3) {
+  if (ints.length < 2) {
     throw new Error('AMM: cannot parse pool int params from script')
   }
+
+  const scriptBuf = Buffer.isBuffer(script) ? script : script.toBuffer()
+  const dataPart = ftProto.parseDataPart(scriptBuf)
+  const lpTotalSupply = new BN(dataPart.tokenAmount.toString())
 
   return {
     tokenACodeHash: hexAt(0),
@@ -116,9 +122,9 @@ export function parsePoolParamsFromScript(script: Buffer | mvc.Script): AmmPoolP
     tokenBID: hexAt(3),
     lpTokenCodeHash: hexAt(4),
     lpTokenID: hexAt(5),
-    lpTotalSupply: ints[0],
-    minReserve: ints[1],
-    feeBps: Number(ints[2].toString()),
+    lpTotalSupply,
+    minReserve: ints[0],
+    feeBps: Number(ints[1].toString()),
   }
 }
 

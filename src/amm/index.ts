@@ -16,7 +16,7 @@ export { FtAmmPoolGenesisFactory, FtAmmPoolGenesis } from './contract-factory/ft
 export type { FtAmmPoolGenesisUnlockArgs } from './contract-factory/ftAmmPoolGenesis'
 export { UserSigLockFactory, UserSigLock } from './contract-factory/userSigLock'
 export type { UserSigLockUnlockArgs } from './contract-factory/userSigLock'
-export { FtAmmPoolManager } from './manager'
+export { FtAmmPoolManager, getUserSigLockAddress } from './manager'
 export type { DeployGenesisResult, PreLockReserveParams, IssuePoolParams, IssuePoolResult, AmmSwapParams, AmmOpResult, AmmAddLiquidityParams, AmmRemoveLiquidityParams } from './manager'
 export * as ftAmmPoolProto from './contract-proto/ftAmmPool.proto'
 export * from './math'

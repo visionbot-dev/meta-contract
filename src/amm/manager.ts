@@ -167,6 +167,28 @@ export type AmmRemoveLiquidityParams = {
 }
 
 /**
+ * 根据用户公钥哈希离线计算 UserSigLock 合约地址（纯函数，不查链/不签名/不广播）。
+ *
+ * UserSigLock 地址是确定性的：
+ * - 合约锁定脚本 = `UserSigLockFactory.createContract({ pubKeyHash })` 生成的 lockingScript
+ * - 地址 = `hash160(lockingScript)`
+ * - 其中 `pubKeyHash = hash160(用户公钥)`
+ *
+ * @param userPubKeyHash hash160(用户公钥) 的 hex 字符串或 Buffer
+ * @param network 'testnet' | 'mainnet'
+ * @returns UserSigLock 合约地址字符串
+ */
+export function getUserSigLockAddress(
+  userPubKeyHash: string | Buffer,
+  network: API_NET | 'testnet' | 'mainnet'
+): string {
+  const pubKeyHashHex = Buffer.isBuffer(userPubKeyHash) ? userPubKeyHash.toString('hex') : userPubKeyHash
+  const contract = UserSigLockFactory.createContract({ pubKeyHash: new Ripemd160(pubKeyHashHex) })
+  const addressHash = mvc.crypto.Hash.sha256ripemd160(contract.lockingScript.toBuffer())
+  return mvc.Address.fromPublicKeyHash(addressHash, network).toString()
+}
+
+/**
  * FtAmmPoolManager：AMM 池交易组装。
  *
  * 继承 FtManager 复用 FT 预处理/解锁基础设施。
@@ -317,6 +339,236 @@ export class FtAmmPoolManager extends FtManager {
     const txId = txComposer.getTxId()
     const txHex = txComposer.getRawHex()
     return { txId, outputIndex: 0, satoshis: 1, txHex, addressHash, addressStr }
+  }
+
+  /**
+   * 撤回锁定在 UserSigLock 上的 FT/LP。
+   *
+   * Token OP_UNLOCK_FROM_CONTRACT 解锁 FT 时，contractTxProof 必须指向主交易中的
+   * UserSigLock 合约输入，因此 UserSigLock UTXO 必然作为 input 被花费；本方法不重建
+   * 该合约输出（1 sat 进入找零），实现彻底撤销。预存 FT 转回用户地址。
+   */
+  public async withdrawUserSigLockFt(params: {
+    codehash: string
+    genesis: string
+    /** 预存在 UserSigLock 地址下的 FT/LP UTXO（tokenAddress = UserSigLock 合约地址） */
+    userSigLockUtxo: ParamFtUtxo
+    /** UserSigLock 合约 UTXO（解锁 FT 的控制合约输入） */
+    userSigLockContractUtxo: { txId: string; outputIndex: number; satoshis: number; txHex: string }
+    /** SPACE 手续费/找零输入（显式传入） */
+    utxos?: any[]
+    /** 用户私钥 WIF（可选；不传则使用 Metalet signer） */
+    userWif?: string
+    /** 撤回目标地址（可选；不传则使用 signer/purse 地址） */
+    userAddress?: string | mvc.Address
+  }): Promise<{ txid: string; txHex: string; unlockCheckTxid: string; unlockCheckTxHex: string }> {
+    const { userAddrBuf, userPubKeyHash, userPrivKey } = await this._getUserAddressAndPubKey(params.userAddress, params.userWif)
+    const changeAddr = mvc.Address.fromPublicKeyHash(userAddrBuf, this.network)
+    const utxoInfo = prepareUtxos(params.utxos)
+
+    // 预存 FT 预处理（OP_UNLOCK_FROM_CONTRACT 需要 prevToken 证明）
+    const ftU = (await this._pretreatAndPerfect(params.userSigLockUtxo)).ft
+    const ftScriptBuf = ftU.lockingScript.toBuffer()
+    const tokenID = toHex(ftProto.getTokenID(ftScriptBuf))
+    const tokenCodeHash = toHex(ftProto.getContractCodeHash(ftScriptBuf))
+
+    // UserSigLock 合约实例与输出证明
+    const userSigLockContract = UserSigLockFactory.createContract({
+      pubKeyHash: new Ripemd160(userPubKeyHash.toString('hex')),
+    })
+    const userSigLockTx = new mvc.Transaction(params.userSigLockContractUtxo.txHex)
+    const userSigLockContractProof = TokenUtil.getTxOutputProof(userSigLockTx, params.userSigLockContractUtxo.outputIndex)
+
+    // amountCheck：FT 输出到用户地址
+    const tokenUnlockType = TOKEN_UNLOCK_TYPE.IN_4_OUT_8
+    const checkContract = TokenUnlockContractCheckFactory.createContract(tokenUnlockType)
+    checkContract.setFormatedDataPart({
+      inputTokenIndexArray: [1],
+      nSender: 1,
+      tokenCodeHash,
+      tokenID,
+      nReceivers: 1,
+      receiverTokenAmountArray: [ftU.tokenAmount],
+      receiverArray: [mvc.Address.fromPublicKeyHash(userAddrBuf, this.network)],
+    })
+
+    // Tx1a：amountCheck UTXO
+    const ucTxComposer = new TxComposer()
+    const ucP2pkhInputIndexes = addP2PKHInputs(ucTxComposer, utxoInfo.utxos)
+    const ucOutIndex = addContractOutput({
+      txComposer: ucTxComposer,
+      lockingScript: checkContract.lockingScript,
+      dustCalculator: this.dustCalculator,
+    })
+    const ucChangeIndex = addChangeOutput(ucTxComposer, changeAddr, this.feeb)
+    await this._unlockP2PKHInputs(ucTxComposer, ucP2pkhInputIndexes, utxoInfo.utxoPrivateKeys)
+    checkFeeRate(ucTxComposer, this.feeb)
+    const ucTx = ucTxComposer.getTx()
+    const ucTxId = ucTxComposer.getTxId()
+    const feeUtxo = { txId: ucTxId, outputIndex: ucChangeIndex, satoshis: ucTx.outputs[ucChangeIndex].satoshis, address: changeAddr }
+
+    // Tx1b：主交易（输入布局：0=UserSigLock, 1=FT, 2=amountCheck, 3=SPACE fee）
+    const txComposer = new TxComposer()
+    const prevouts = new Prevouts()
+    const userSigLockInputIndex = txComposer.appendInput({
+      txId: params.userSigLockContractUtxo.txId,
+      outputIndex: params.userSigLockContractUtxo.outputIndex,
+      satoshis: params.userSigLockContractUtxo.satoshis,
+      lockingScript: userSigLockTx.outputs[params.userSigLockContractUtxo.outputIndex].script,
+    })
+    prevouts.addVout(params.userSigLockContractUtxo.txId, params.userSigLockContractUtxo.outputIndex)
+    const ftInputIndex = txComposer.appendInput({
+      txId: params.userSigLockUtxo.txId,
+      outputIndex: params.userSigLockUtxo.outputIndex,
+      satoshis: ftU.satoshis,
+      lockingScript: ftU.lockingScript,
+    })
+    prevouts.addVout(params.userSigLockUtxo.txId, params.userSigLockUtxo.outputIndex)
+    const ucInputIndex = txComposer.appendInput({
+      txId: ucTxId,
+      outputIndex: ucOutIndex,
+      satoshis: ucTx.outputs[ucOutIndex].satoshis,
+      lockingScript: ucTx.outputs[ucOutIndex].script,
+    })
+    prevouts.addVout(ucTxId, ucOutIndex)
+    const feeInputIndex = addP2PKHInputs(txComposer, [feeUtxo])[0]
+    prevouts.addVout(feeUtxo.txId, feeUtxo.outputIndex)
+
+    // 输出：FT→用户（SPACE 找零在解锁脚本设置后追加，确保 fee 估算包含合约脚本）
+    const userFtScript = ftProto.getNewTokenScript(ftScriptBuf, userAddrBuf, ftU.tokenAmount)
+    txComposer.appendOutput({ lockingScript: mvc.Script.fromBuffer(userFtScript), satoshis: 1 })
+
+    // Token OP_UNLOCK_FROM_CONTRACT（contract = UserSigLock 输入）
+    const tokenContract = TokenFactory.createContract(this.transferCheckCodeHashArray, this.unlockContractCodeHashArray, 2)
+    tokenContract.setDataPart(toHex(ftProto.newDataPart(ftProto.parseDataPart(ftScriptBuf))))
+    const amountCheckTxOutputProofInfo = new TxOutputProof(TokenUtil.getTxOutputProof(ucTx, ucOutIndex))
+    const amountCheckScriptBuf = ucTx.outputs[ucOutIndex].script.toBuffer()
+    const prevTokenInputIndex = ftU.prevTokenInputIndex
+    const prevTokenAddress = new Bytes(toHex(ftU.preTokenAddress.hashBuffer))
+    const prevTokenAmount = BigInt(ftU.preTokenAmount.toString(10))
+    const tokenTx = new mvc.Transaction(ftU.satotxInfo.txHex)
+    const inputRes = TokenUtil.getTxInputProof(tokenTx, prevTokenInputIndex)
+    const tokenTxInputProof = new TxInputProof(inputRes[0])
+    const tokenTxHeader = inputRes[1] as Bytes
+    const prevTokenTxOutputProof = new TxOutputProof(TokenUtil.getTxOutputProof(ftU.prevTokenTx, ftU.prevTokenOutputIndex))
+    const tokenInfoHex = TokenUtil.getTxInfoHex(tokenTx, ftU.outputIndex)
+    const unlockArgs: any = {
+      txPreimage: txComposer.getInputPreimage(ftInputIndex),
+      prevouts: new Bytes(prevouts.toHex()),
+      tokenInputIndex: 0,
+      amountCheckHashIndex: tokenUnlockType - 1,
+      amountCheckInputIndex: ucInputIndex,
+      amountCheckTxOutputProofInfo,
+      amountCheckScript: new Bytes(amountCheckScriptBuf.toString('hex')),
+      prevTokenInputIndex,
+      prevTokenAddress,
+      prevTokenAmount,
+      tokenTxHeader,
+      tokenTxInputProof,
+      prevTokenTxOutputProof,
+      contractInputIndex: userSigLockInputIndex,
+      contractTxOutputProof: new TxOutputProof(userSigLockContractProof),
+      operation: ftProto.OP_UNLOCK_FROM_CONTRACT,
+    }
+    unlockArgs.senderPubKey = new PubKey(PLACE_HOLDER_PUBKEY)
+    unlockArgs.senderSig = new Sig(PLACE_HOLDER_SIG)
+    const unlockCall = tokenContract.unlock(unlockArgs)
+    if (this.debug) {
+      const ret = unlockCall.verify({
+        tx: txComposer.getTx(),
+        inputIndex: ftInputIndex,
+        inputSatoshis: ftU.satoshis,
+      })
+      if (!ret.success) throw new Error(`AMM withdrawUserSigLockFt Token unlock failed: ${ret.error || JSON.stringify(ret)}`)
+    }
+    txComposer.getInput(ftInputIndex).setScript(unlockCall.toScript() as mvc.Script)
+
+    // SPACE 找零（必须在 UserSigLock 签名前添加，SIGHASH_ALL 覆盖所有输出）
+    txComposer.appendChangeOutput(changeAddr, this.feeb, 10000)
+
+    // 解锁 amountCheck（需在最终输出确定后构造 otherOutputArray）
+    {
+      const ucScript: any = ucTx.outputs[ucOutIndex].script
+      const ucPreimage = new SigHashPreimage(
+        toHex(getPreimage(txComposer.getTx(), ucScript.subScript(0), ucTx.outputs[ucOutIndex].satoshis, ucInputIndex))
+      )
+      const tokenOutputIndexArray = Buffer.alloc(4)
+      tokenOutputIndexArray.writeUInt32LE(0, 0)
+      let otherOutputArray = Buffer.alloc(0)
+      txComposer.getTx().outputs.forEach((output, index) => {
+        if (index !== 0) {
+          const outputBuf = Buffer.concat([getUInt64Buf(output.satoshis), writeVarint(output.script.toBuffer())])
+          otherOutputArray = Buffer.concat([otherOutputArray, getUInt32Buf(outputBuf.length), outputBuf])
+        }
+      })
+      const tokenTxHeaderArray = Buffer.from(tokenInfoHex.txHeader, 'hex')
+      const hashProofBuf = Buffer.from(tokenInfoHex.txHashProof, 'hex')
+      const tokenTxHashProofArray = Buffer.concat([getUInt32Buf(hashProofBuf.length), hashProofBuf])
+      const tokenSatoshiBytesArray = Buffer.from(tokenInfoHex.txSatoshi, 'hex')
+      const inputTokenAddressArray = ftU.tokenAddress.hashBuffer
+      const inputTokenAmountArray = ftU.tokenAmount.toBuffer({ endian: 'little', size: 8 })
+      const ucCall = checkContract.unlock({
+        txPreimage: ucPreimage,
+        prevouts: new Bytes(prevouts.toHex()),
+        tokenScript: new Bytes(toHex(ftScriptBuf)),
+        tokenTxHeaderArray: new Bytes(toHex(tokenTxHeaderArray)),
+        tokenTxHashProofArray: new Bytes(toHex(tokenTxHashProofArray)),
+        tokenSatoshiBytesArray: new Bytes(toHex(tokenSatoshiBytesArray)),
+        inputTokenAddressArray: new Bytes(toHex(inputTokenAddressArray)),
+        inputTokenAmountArray: new Bytes(toHex(inputTokenAmountArray)),
+        nOutputs: txComposer.getTx().outputs.length,
+        tokenOutputIndexArray: new Bytes(toHex(tokenOutputIndexArray)),
+        tokenOutputSatoshis: txComposer.getTx().outputs[0].satoshis,
+        otherOutputArray: new Bytes(toHex(otherOutputArray)),
+      })
+      if (this.debug) {
+        const ret = ucCall.verify({
+          tx: txComposer.getTx(),
+          inputIndex: ucInputIndex,
+          inputSatoshis: ucTx.outputs[ucOutIndex].satoshis,
+        })
+        if (!ret.success) throw new Error(`AMM withdrawUserSigLockFt amountCheck unlock failed: ${ret.error || JSON.stringify(ret)}`)
+      }
+      txComposer.getInput(ucInputIndex).setScript(ucCall.toScript() as mvc.Script)
+    }
+
+    // UserSigLock 解锁（用户签名，授权 FT 转出；签名覆盖最终输出）
+    const { pubKeyHex, sigHex } = await this._signUserSigLock(
+      txComposer,
+      userPrivKey,
+      userSigLockInputIndex,
+      params.userSigLockContractUtxo,
+      userSigLockContract
+    )
+    const uslSubScript = (userSigLockContract.lockingScript as any).subScript(0)
+    const uslPreimage = new SigHashPreimage(
+      toHex(getPreimage(txComposer.getTx(), uslSubScript, params.userSigLockContractUtxo.satoshis, userSigLockInputIndex))
+    )
+    const uslCall = userSigLockContract.unlock({
+      txPreimage: uslPreimage,
+      senderPubKey: new PubKey(pubKeyHex),
+      senderSig: new Sig(sigHex),
+    })
+    if (this.debug) {
+      const ret = uslCall.verify({
+        tx: txComposer.getTx(),
+        inputIndex: userSigLockInputIndex,
+        inputSatoshis: params.userSigLockContractUtxo.satoshis,
+      })
+      if (!ret.success) throw new Error(`AMM withdrawUserSigLockFt UserSigLock unlock failed: ${ret.error || JSON.stringify(ret)}`)
+    }
+    txComposer.getInput(userSigLockInputIndex).setScript(uslCall.toScript() as mvc.Script)
+
+    // SPACE fee 解锁
+    await this._unlockFee(txComposer, feeInputIndex, undefined)
+    checkFeeRate(txComposer, this.feeb)
+
+    return {
+      txid: txComposer.getTxId(),
+      txHex: txComposer.getRawHex(),
+      unlockCheckTxid: ucTxId,
+      unlockCheckTxHex: ucTxComposer.getRawHex(),
+    }
   }
 
   /**

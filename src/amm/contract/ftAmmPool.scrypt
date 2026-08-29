@@ -323,18 +323,17 @@ contract FtAmmPool {
             require(amountAIn > 0);
             require(amountBIn > 0);
 
-            // 等比例约束
-            require(mul(amountAIn, reserveB_old) == mul(amountBIn, reserveA_old));
+            // B 必须等于按 A 计算的最优 B（合约算法固定，不退回多余）
+            int optimalB = mul(amountAIn, reserveB_old) / reserveA_old;
+            require(optimalB > 0);
+            require(amountBIn == optimalB);
 
             // LP 铸造量（按流通 LP 计算：S - lpReserve_old）
+            // 由于 amountBIn == optimalB = floor(A*reserveB/reserveA)，
+            // B 侧 LP <= A 侧 LP，取 B 侧（= min 语义）保证不多铸
             int circulatingLp = lpTotalSupply - lpReserve_old;
             require(circulatingLp > 0);
-            int lpMintA = mul(amountAIn, circulatingLp) / reserveA_old;
-            int lpMintB = mul(amountBIn, circulatingLp) / reserveB_old;
-            int lpMintCalc = lpMintA;
-            if (lpMintB < lpMintA) {
-                lpMintCalc = lpMintB;
-            }
+            int lpMintCalc = mul(amountBIn, circulatingLp) / reserveB_old;
             require(lpMintCalc > 0);
             require(lpMintCalc <= lpReserve_old);
             require(lpMintCalc == lpMint);

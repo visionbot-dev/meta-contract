@@ -23,6 +23,8 @@ export type AmmSwapQuote = {
 }
 
 export type AmmAddLiquidityQuote = {
+  /** 按 amountAIn 计算的最优 B（amountBIn 必须等于它） */
+  amountBRequired: BN
   lpMint: BN
   reserveA: BN
   reserveB: BN

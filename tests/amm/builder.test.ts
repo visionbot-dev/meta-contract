@@ -56,7 +56,7 @@ describe('AMM builder', () => {
       creatorAddress: USER,
     })
 
-    expect(result.poolScript.length).to.equal(6705)
+    expect(result.poolScript.length).to.equal(6640)
     expect(result.poolAddress.length).to.equal(20)
 
     expect(ftProto.getTokenAmount(result.reserveAScript).toString()).to.equal('100')

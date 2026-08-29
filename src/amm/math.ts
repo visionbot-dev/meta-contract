@@ -88,6 +88,8 @@ export function getSwapQuote(
 
 /**
  * ADD 流动性报价：LP 按流通量 C = lpTotalSupply - lpReserve 计算
+ *
+ * 合约算法固定：B 必须等于按 A 计算的最优 B（floor），不退回多余。
  */
 export function getAddLiquidityQuote(
   state: Pick<AmmPoolState, 'reserveA' | 'reserveB' | 'lpReserve' | 'lpTotalSupply'>,
@@ -102,11 +104,19 @@ export function getAddLiquidityQuote(
     throw new Error('AMM math: circulating LP must be > 0')
   }
 
-  const lpMintA = divFloor(mul(amountAIn, circulatingLp), state.reserveA)
-  const lpMintB = divFloor(mul(amountBIn, circulatingLp), state.reserveB)
-  const lpMint = lpMintA.lt(lpMintB) ? lpMintA : lpMintB
+  const amountBRequired = divFloor(mul(amountAIn, state.reserveB), state.reserveA)
+  if (amountBRequired.lte(new BN(0))) {
+    throw new Error('AMM math: amountBRequired must be > 0')
+  }
+  if (!amountBIn.eq(amountBRequired)) {
+    throw new Error(`AMM math: amountBIn must equal optimalB ${amountBRequired.toString()}`)
+  }
+
+  // 与合约一致：amountBIn == optimalB 时 B 侧 LP <= A 侧 LP，取 B 侧（min 语义）
+  const lpMint = divFloor(mul(amountBIn, circulatingLp), state.reserveB)
 
   return {
+    amountBRequired,
     lpMint,
     reserveA: state.reserveA.add(amountAIn),
     reserveB: state.reserveB.add(amountBIn),

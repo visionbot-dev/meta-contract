@@ -144,6 +144,7 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
     poolProofOverride?: any
     poolTxHeaderOverride?: Bytes
     extraArgs?: any
+    contractOverride?: { contract: any; subScript: any }
   } = {}) {
     const {
       userScript = userAScript,
@@ -159,7 +160,11 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
       poolProofOverride = createTxOutputProof(issueTx, 0),
       poolTxHeaderOverride,
       extraArgs = {},
+      contractOverride,
     } = opts
+
+    const activeContract = contractOverride?.contract || contract
+    const activeSubScript = contractOverride?.subScript || contractSubScript
 
     const tx = new mvc.Transaction()
     tx.version = 10
@@ -176,8 +181,8 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
     tx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(userOutScript || ftProto.getNewTokenScript(reserveBScript, USER_ADDRESS, new BN(amountOut))), satoshis: SATOSHIS }))
 
     const prevouts = buildPrevouts(tx)
-    const preimage = getPreimage(tx, contractSubScript, SATOSHIS, 0, mvc.crypto.Signature.SIGHASH_ALL | mvc.crypto.Signature.SIGHASH_FORKID)
-    const call = contract.unlock({
+    const preimage = getPreimage(tx, activeSubScript, SATOSHIS, 0, mvc.crypto.Signature.SIGHASH_ALL | mvc.crypto.Signature.SIGHASH_FORKID)
+    const call = activeContract.unlock({
       txPreimage: new SigHashPreimage(toHex(preimage)),
       prevouts: new Bytes(toHex(prevouts)),
       poolScript: new Bytes(toHex(poolScript)),
@@ -253,6 +258,48 @@ describe('FtAmmPool contract unlock failure cases (post-issue)', () => {
   it('Backtrace: wrong poolTxHeader should fail', () => {
     const evilHeader = new Bytes('00'.repeat(80))
     const { tx, call } = buildSwapAtoB({ poolTxHeaderOverride: evilHeader })
+    expectFail(call, tx)
+  })
+
+  it('H1: SWAP user input is pool-owned FT should fail even with userSigLockAddress=poolAddress', () => {
+    // 池地址下额外一枚 FT-A（捐赠/误转场景），攻击者尝试用 userSigLockAddress=poolAddress 绕过
+    const poolOwnedAScript = ftProto.getNewTokenScript(reserveAScript, poolAddress, new BN(100))
+    const donationTx = new mvc.Transaction()
+    donationTx.version = 10
+    donationTx.addOutput(new mvc.Transaction.Output({ script: mvc.Script.fromBuffer(poolOwnedAScript), satoshis: SATOSHIS }))
+    const { tx, call } = buildSwapAtoB({
+      userScript: poolOwnedAScript,
+      userProof: createTxOutputProof(donationTx, 0),
+      userPrevTxId: getSatotxId(donationTx),
+      amountIn: 100,
+      extraArgs: { userSigLockAddress: new Bytes(toHex(poolAddress)) },
+    })
+    expectFail(call, tx)
+  })
+
+  it('H1b: SWAP userAddress=poolAddress should fail', () => {
+    // 用户输出也指向 poolAddress，排除 hashOutputs 干扰，专门验证 userAddress != poolAddress
+    const userOutToPool = ftProto.getNewTokenScript(reserveBScript, poolAddress, new BN(90))
+    const { tx, call } = buildSwapAtoB({
+      userOutScript: userOutToPool,
+      extraArgs: { userAddress: new Bytes(toHex(poolAddress)) },
+    })
+    expectFail(call, tx)
+  })
+
+  it('M1: invalid feeBps (-1) should fail at unlock start', () => {
+    const bad = FtAmmPoolFactory.createContract({ ...contract.constuctParams, feeBps: -1 })
+    bad.setDataPart(toHex(ftProto.newDataPart({ ...ftProto.parseDataPart(poolScript) })))
+    const badSubScript = (bad.lockingScript as any).subScript(0)
+    const { tx, call } = buildSwapAtoB({ contractOverride: { contract: bad, subScript: badSubScript } })
+    expectFail(call, tx)
+  })
+
+  it('M2: minReserve=0 should fail at unlock start', () => {
+    const bad = FtAmmPoolFactory.createContract({ ...contract.constuctParams, minReserve: 0 })
+    bad.setDataPart(toHex(ftProto.newDataPart({ ...ftProto.parseDataPart(poolScript) })))
+    const badSubScript = (bad.lockingScript as any).subScript(0)
+    const { tx, call } = buildSwapAtoB({ contractOverride: { contract: bad, subScript: badSubScript } })
     expectFail(call, tx)
   })
 

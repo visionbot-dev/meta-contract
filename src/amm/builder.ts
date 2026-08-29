@@ -38,6 +38,16 @@ export type AmmPoolData = {
  * 存入池 UTXO data part 的 tokenAmount（8 字节小端无符号）。
  */
 export function buildPoolLockingScript(params: AmmPoolParams, data: AmmPoolData): Buffer {
+  // M1/M2：SDK 层前置校验，与合约内校验保持一致
+  if (params.feeBps < 0 || params.feeBps >= 10000) {
+    throw new Error(`AMM: invalid feeBps ${params.feeBps}, must be 0 <= feeBps < 10000`)
+  }
+  if (params.minReserve.lten(0)) {
+    throw new Error(`AMM: minReserve must be > 0, got ${params.minReserve.toString()}`)
+  }
+  if (params.lpTotalSupply.lten(0)) {
+    throw new Error(`AMM: lpTotalSupply must be > 0, got ${params.lpTotalSupply.toString()}`)
+  }
   const contract = FtAmmPoolFactory.createContract({
     tokenACodeHash: new Bytes(params.tokenACodeHash),
     tokenAID: new Bytes(params.tokenAID),

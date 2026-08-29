@@ -88,6 +88,10 @@ contract FtAmmPoolGenesis {
     ) {
         require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
 
+        // M1/M2：构造参数链上校验，防止非法费率/最小储备破坏经济模型
+        require(this.feeBps >= 0 && this.feeBps < 10000);
+        require(this.minReserve > 0);
+
         bytes thisOutpoint = SigHash.outpoint(txPreimage);
         TxUtil.verifyTxOutput(genesisProof, thisOutpoint);
         require(sha256(genesisScript) == genesisProof.scriptHash);

@@ -96,6 +96,10 @@ contract FtAmmPool {
         // 用户输入 FT 可以是：1) 仍在用户地址（tokenAddress == userAddress）；
         // 2) 已预存到 UserSigLock 合约地址（tokenAddress == userSigLockAddress，由用户签名解锁，防截胡）
         bytes tokenAddr = TokenProto.getTokenAddress(script, scriptLen);
+        // H1：用户输入严禁是池自有 FT（防止用捐赠/误转给池子的资产免费兑换/铸币）
+        require(tokenAddr != poolAddress);
+        require(userAddress != poolAddress);
+        require(userSigLockAddress != poolAddress);
         require(tokenAddr == userAddress || tokenAddr == userSigLockAddress);
         return amount;
     }
@@ -121,6 +125,8 @@ contract FtAmmPool {
         require(TokenProto.getTokenAmount(script, scriptLen) == amount);
         require(TokenProto.getTokenAddress(script, scriptLen) != poolAddress);
         bytes tokenAddr = TokenProto.getTokenAddress(script, scriptLen);
+        require(userAddress != poolAddress);
+        require(userSigLockAddress != poolAddress);
         require(tokenAddr == userAddress || tokenAddr == userSigLockAddress);
         return amount;
     }
@@ -174,6 +180,10 @@ contract FtAmmPool {
         bytes prevPoolTxOutputSatoshiBytes
     ) {
         require(hash256(prevouts) == SigHash.hashPrevouts(txPreimage));
+
+        // M1/M2：构造参数链上校验，防止非法费率/最小储备破坏经济模型
+        require(this.feeBps >= 0 && this.feeBps < 10000);
+        require(this.minReserve > 0);
 
         // 池输入必须是当前 input 的 prevout，且传入脚本必须是链上真实完整锁定脚本
         // （SigHash.scriptCode 只是 OP_CODESEPARATOR 后的片段，不能用来算池地址/构造新池输出）
